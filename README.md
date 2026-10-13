@@ -9,6 +9,9 @@ Rust 负责业务和运行管理，SwiftUI 负责原生界面。
 
 ## 当前实现
 
+迁移任务和验收进度统一记录在 [MIGRATION.md](MIGRATION.md)。每次开发先
+阅读清单，完成任务后在同一次签名提交中更新状态与验证证据。
+
 - 产品构建目标已收窄为 `aarch64-apple-darwin`、macOS 26+；Windows/Linux
   源码分支、直接依赖、安装资源和构建矩阵已清理。
 - 原生 SwiftUI 视觉样板：六页导航、Liquid Glass 控件、菜单栏、概览、

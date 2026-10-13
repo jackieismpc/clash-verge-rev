@@ -4,6 +4,11 @@ This is an independently maintained descendant of Clash Verge Rev. The approved
 native migration is the change scope; an upstream issue or pull request is not
 required. Preserve the GPL license, source attribution, and Git history.
 
+Read `MIGRATION.md` before every development task. Select an unfinished task ID,
+and update its progress and validation evidence in the same signed commit as the
+implementation. Never mark partial or unvalidated work complete. It is the sole
+migration progress document; README and interface documents contain usage only.
+
 - Support Apple Silicon and macOS 26 or later only.
 - Work directly on `main`. Validate each coherent change before
   `git commit -s -S`. Use English Conventional Commit subjects. Never fall back to
@@ -17,7 +22,8 @@ required. Preserve the GPL license, source attribution, and Git history.
   mihomo update implementation until a separate core replacement is approved.
 - Do not stop, reconfigure, or take ownership of the user's daily proxy. Use
   separate application data, controller sockets, ports, and service channels.
-- Keep the existing UI usable until all retained workflows work in SwiftUI.
+- Retire the legacy frontend after SwiftUI visual and interaction acceptance.
+  Keep necessary legacy Rust business code until its native replacement works.
   Label demonstration data. A visual sample is not a functioning proxy client.
 - Swift owns native presentation. Rust owns persistent configuration, command
   ordering, core lifecycle, cancellation, and events. Keep the proxy engine

@@ -8,6 +8,7 @@ members = [
   "crates/tauri-plugin-clash-verge-sysinfo",
   "crates/clash-verge-i18n",
   "crates/clash-verge-limiter",
+  "crates/clash-verge-native-core",
 ]
 resolver = "2"
 
@@ -45,10 +46,6 @@ strip = false
 inherits = "fast-release"
 codegen-units = 1
 split-debuginfo = "unpacked"
-
-[patch.crates-io]
-# Backport Windows menu command ID recycling on the muda 0.20 compatibility branch.
-muda = { git = "https://github.com/wonfen/muda.git", rev = "547de49352791653fbdfa785f20f3c7ece8468e2" }
 
 [workspace.dependencies]
 clash-verge-draft = { path = "crates/clash-verge-draft" }

@@ -1227,6 +1227,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "clash-verge-native-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clash-verge-media-unlock",
+ "futures-util",
+ "reqwest 0.13.5",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "tokio",
+ "tokio-tungstenite",
+]
+
+[[package]]
 name = "clash-verge-signal"
 version = "0.1.0"
 dependencies = [
@@ -4223,7 +4238,8 @@ dependencies = [
 [[package]]
 name = "muda"
 version = "0.20.0"
-source = "git+https://github.com/wonfen/muda.git?rev=547de49352791653fbdfa785f20f3c7ece8468e2#547de49352791653fbdfa785f20f3c7ece8468e2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cca139e57da4383727f189e43e66e84fa372347027fc996f9f1a007ec0a37996"
 dependencies = [
  "crossbeam-channel",
  "dpi",
@@ -4237,7 +4253,7 @@ dependencies = [
  "png 0.18.1",
  "serde",
  "thiserror 2.0.20",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

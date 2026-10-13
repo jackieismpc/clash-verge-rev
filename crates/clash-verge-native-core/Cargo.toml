@@ -1,0 +1,22 @@
+[package]
+name = "clash-verge-native-core"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "Tauri-independent business runtime and C interface for the native macOS client"
+
+[lib]
+name = "clash_verge_native_core"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_yaml_ng = { workspace = true }
+tokio = { workspace = true, features = ["fs", "process", "net", "io-util"] }
+reqwest = { workspace = true }
+clash-verge-media-unlock = { workspace = true }
+futures-util = "0.3"
+tokio-tungstenite = "0.28"
+

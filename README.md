@@ -11,11 +11,12 @@ Rust 负责业务和运行管理，SwiftUI 负责原生界面。
 
 - 产品构建目标已收窄为 `aarch64-apple-darwin`、macOS 26+。
 - 原生 SwiftUI 视觉样板：六页导航、Liquid Glass 控件、菜单栏、概览、
-  节点表、配置导入和错误详情。当前默认展示明确标记的演示数据。
+  节点表、订阅管理和错误详情；已接通 Rust 与真实 mihomo。
+  `--demo` 可切换到明确标记的视觉样本。
 - 独立 Rust 业务库：配置事务、订阅获取、独立内核生命周期、Unix
   controller、状态流、解锁检测和本地备份；不依赖 Tauri。
 - React/Tauri 保留为迁移期间的功能对照。原生系统代理、DNS/TUN、
-  旧数据导入和完整业务接线仍在实施中，尚不作为日常代理替代品。
+  旧数据导入及完整产品验收仍在实施中，尚不作为日常代理替代品。
 
 ## 本地开发
 
@@ -25,6 +26,8 @@ Rust 负责业务和运行管理，SwiftUI 负责原生界面。
 生成目录。不要提交下载的二进制或运行数据。
 
 ```sh
+node scripts/native-core-assets.mjs
+scripts/native-core-build.sh build
 scripts/native-ui-build.sh
 open '.work/native-ui/Clash Native.app'
 scripts/native-ui-test.sh

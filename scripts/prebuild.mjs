@@ -20,10 +20,14 @@ if (
   targetArguments.length > 1 ||
   (targetArguments.length === 1 && targetArguments[0] !== TARGET)
 ) {
-  throw new Error('prebuild supports aarch64-apple-darwin on Apple Silicon macOS only')
+  throw new Error(
+    'prebuild supports aarch64-apple-darwin on Apple Silicon macOS only',
+  )
 }
 const majorVersion = Number(
-  execFileSync('sw_vers', ['-productVersion'], { encoding: 'utf8' }).split('.')[0],
+  execFileSync('sw_vers', ['-productVersion'], { encoding: 'utf8' }).split(
+    '.',
+  )[0],
 )
 if (!Number.isInteger(majorVersion) || majorVersion < 26) {
   throw new Error('prebuild requires macOS 26 or later')
@@ -33,7 +37,9 @@ const RESOURCES_DIR = path.join(ROOT, 'src-tauri', 'resources')
 const SIDECAR_DIR = path.join(ROOT, 'src-tauri', 'sidecar')
 
 async function sha256(file) {
-  return createHash('sha256').update(await fs.readFile(file)).digest('hex')
+  return createHash('sha256')
+    .update(await fs.readFile(file))
+    .digest('hex')
 }
 
 async function download(url, destination, expectedHash) {
@@ -46,9 +52,13 @@ async function download(url, destination, expectedHash) {
     }
   }
   const response = await fetch(url)
-  if (!response.ok) throw new Error(`Download failed: ${url}: ${response.status}`)
+  if (!response.ok)
+    throw new Error(`Download failed: ${url}: ${response.status}`)
   const bytes = Buffer.from(await response.arrayBuffer())
-  if (expectedHash && createHash('sha256').update(bytes).digest('hex') !== expectedHash) {
+  if (
+    expectedHash &&
+    createHash('sha256').update(bytes).digest('hex') !== expectedHash
+  ) {
     throw new Error(`SHA256 mismatch: ${url}`)
   }
   await fs.mkdir(path.dirname(destination), { recursive: true })
@@ -67,10 +77,14 @@ async function prepareCore(channel, record) {
     typeof record.version !== 'string' ||
     !record.version ||
     typeof record.url !== 'string' ||
-    !record.url.startsWith('https://github.com/MetaCubeX/mihomo/releases/download/') ||
+    !record.url.startsWith(
+      'https://github.com/MetaCubeX/mihomo/releases/download/',
+    ) ||
     !/^[0-9a-f]{64}$/.test(record.sha256 ?? '')
   ) {
-    throw new Error(`Pinned ${channel} core requires version, release URL, and archive SHA256`)
+    throw new Error(
+      `Pinned ${channel} core requires version, release URL, and archive SHA256`,
+    )
   }
   const name = channel === 'alpha' ? 'verge-mihomo-alpha' : 'verge-mihomo'
   const archive = path.join(TEMP_DIR, `${name}-${record.sha256}.gz`)
@@ -108,7 +122,10 @@ async function findExtractedFile(directory, filename) {
 }
 
 async function prepareService() {
-  const manifest = await fs.readFile(path.join(ROOT, 'src-tauri', 'Cargo.toml'), 'utf8')
+  const manifest = await fs.readFile(
+    path.join(ROOT, 'src-tauri', 'Cargo.toml'),
+    'utf8',
+  )
   const dependency = manifest
     .split(/\r?\n/)
     .find((line) => line.trimStart().startsWith('clash_verge_service_ipc ='))
@@ -116,25 +133,39 @@ async function prepareService() {
   await fs.mkdir(RESOURCES_DIR, { recursive: true })
   let sourceDirectory
   if (source) {
-    const targetDirectory = path.join(ROOT, '.work', 'target', 'bundled-service')
-    execFileSync('cargo', [
-      'build',
-      '--manifest-path', path.resolve(ROOT, 'src-tauri', source, 'Cargo.toml'),
-      '--target-dir', targetDirectory,
-      '--target', TARGET,
-      '--locked',
-      '--release',
-      '--features', 'standalone,client',
-      '--bins',
-    ], {
-      stdio: 'inherit',
-      env: {
-        ...process.env,
-        CARGO_HOME: process.env.CARGO_HOME || path.join(ROOT, '.work', 'cargo'),
-        TMPDIR: process.env.TMPDIR || path.join(ROOT, '.work', 'tmp'),
-        MACOSX_DEPLOYMENT_TARGET: '26.0',
+    const targetDirectory = path.join(
+      ROOT,
+      '.work',
+      'target',
+      'bundled-service',
+    )
+    execFileSync(
+      'cargo',
+      [
+        'build',
+        '--manifest-path',
+        path.resolve(ROOT, 'src-tauri', source, 'Cargo.toml'),
+        '--target-dir',
+        targetDirectory,
+        '--target',
+        TARGET,
+        '--locked',
+        '--release',
+        '--features',
+        'standalone,client',
+        '--bins',
+      ],
+      {
+        stdio: 'inherit',
+        env: {
+          ...process.env,
+          CARGO_HOME:
+            process.env.CARGO_HOME || path.join(ROOT, '.work', 'cargo'),
+          TMPDIR: process.env.TMPDIR || path.join(ROOT, '.work', 'tmp'),
+          MACOSX_DEPLOYMENT_TARGET: '26.0',
+        },
       },
-    })
+    )
     sourceDirectory = path.join(targetDirectory, TARGET, 'release')
   } else {
     const release = resolveServiceRelease(manifest, TARGET, 'darwin')
@@ -156,7 +187,8 @@ async function prepareService() {
 }
 
 async function prepareResources() {
-  const base = 'https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest'
+  const base =
+    'https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest'
   for (const [destination, asset] of [
     ['Country.mmdb', 'country.mmdb'],
     ['ASN.mmdb', 'GeoLite2-ASN.mmdb'],
@@ -166,14 +198,27 @@ async function prepareResources() {
     await download(`${base}/${asset}`, path.join(RESOURCES_DIR, destination))
   }
   for (const name of ['set_dns.sh', 'unset_dns.sh']) {
-    await fs.copyFile(path.join(ROOT, 'scripts', name), path.join(RESOURCES_DIR, name))
+    await fs.copyFile(
+      path.join(ROOT, 'scripts', name),
+      path.join(RESOURCES_DIR, name),
+    )
   }
 }
 
 async function run() {
-  const lock = JSON.parse(await fs.readFile(path.join(ROOT, 'src-tauri', 'core-artifacts.json'), 'utf8'))
-  if (lock.target !== TARGET) throw new Error('Core artifact lock must target aarch64-apple-darwin')
-  for (const directory of [TEMP_DIR, path.join(ROOT, '.work', 'cargo'), path.join(ROOT, '.work', 'tmp')]) {
+  const lock = JSON.parse(
+    await fs.readFile(
+      path.join(ROOT, 'src-tauri', 'core-artifacts.json'),
+      'utf8',
+    ),
+  )
+  if (lock.target !== TARGET)
+    throw new Error('Core artifact lock must target aarch64-apple-darwin')
+  for (const directory of [
+    TEMP_DIR,
+    path.join(ROOT, '.work', 'cargo'),
+    path.join(ROOT, '.work', 'tmp'),
+  ]) {
     await fs.mkdir(directory, { recursive: true })
   }
   await prepareCore('stable', lock.cores?.stable)

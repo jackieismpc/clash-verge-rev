@@ -28,17 +28,28 @@ export function buildTauriInvocation(
   environment = process.env,
   platform = process.platform,
 ) {
-  if (platform !== 'darwin') throw new Error('Development requires macOS on Apple Silicon')
+  if (platform !== 'darwin')
+    throw new Error('Development requires macOS on Apple Silicon')
   const env = {
     ...environment,
     RUST_BACKTRACE: 'full',
     MACOSX_DEPLOYMENT_TARGET: '26.0',
-    CARGO_HOME: environment.CARGO_HOME || join(repositoryRoot, '.work', 'cargo'),
-    CARGO_TARGET_DIR: environment.CARGO_TARGET_DIR || join(repositoryRoot, '.work', 'target'),
+    CARGO_HOME:
+      environment.CARGO_HOME || join(repositoryRoot, '.work', 'cargo'),
+    CARGO_TARGET_DIR:
+      environment.CARGO_TARGET_DIR || join(repositoryRoot, '.work', 'target'),
     TMPDIR: environment.TMPDIR || join(repositoryRoot, '.work', 'tmp'),
   }
   const features = mode === 'sidecar' ? 'verge-dev,dev-sidecar' : 'verge-dev'
-  const args = ['exec', 'tauri', 'dev', '--target', 'aarch64-apple-darwin', '-f', features]
+  const args = [
+    'exec',
+    'tauri',
+    'dev',
+    '--target',
+    'aarch64-apple-darwin',
+    '-f',
+    features,
+  ]
   if (mode === 'trace') {
     env.RUSTFLAGS = '--cfg tokio_unstable'
     args.push('tokio-trace')
@@ -168,9 +179,11 @@ export async function runDevAnchor(mode, dependencies = {}) {
     throw new Error('usage: node scripts/dev.mjs --anchor <dev|trace|sidecar>')
   }
 
-  if (platform !== 'darwin') throw new Error('Development requires macOS on Apple Silicon')
+  if (platform !== 'darwin')
+    throw new Error('Development requires macOS on Apple Silicon')
   const architecture = dependencies.architecture ?? process.arch
-  if (architecture !== 'arm64') throw new Error('Development requires Apple Silicon')
+  if (architecture !== 'arm64')
+    throw new Error('Development requires Apple Silicon')
   const environment = dependencies.environment ?? process.env
   const spawnChild = dependencies.spawnChild ?? spawn
   const send = dependencies.send ?? sendToParent
@@ -319,9 +332,11 @@ export async function runDevCommand(mode, dependencies = {}) {
   }
 
   const platform = dependencies.platform ?? process.platform
-  if (platform !== 'darwin') throw new Error('Development requires macOS on Apple Silicon')
+  if (platform !== 'darwin')
+    throw new Error('Development requires macOS on Apple Silicon')
   const architecture = dependencies.architecture ?? process.arch
-  if (architecture !== 'arm64') throw new Error('Development requires Apple Silicon')
+  if (architecture !== 'arm64')
+    throw new Error('Development requires Apple Silicon')
   const environment = dependencies.environment ?? process.env
   const spawnChild = dependencies.spawnChild ?? spawn
   const exit = dependencies.exit ?? ((code) => process.exit(code))

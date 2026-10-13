@@ -10,7 +10,7 @@ mod ffi;
 use anyhow::{Context, Result, bail};
 use config::{MAX_DOCUMENT_BYTES, Options, Profile, Store, atomic_write, now, parse_yaml};
 use controller::{Controller, percent_encode, public_request_allowed, stopped};
-use futures_util::FutureExt;
+use futures_util::{FutureExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -134,15 +134,28 @@ impl Shared {
         }
         events.push_back(event);
     }
+    fn publish_read_result(&self, id: &str, generation: u64, revision: u64, outcome: Result<Value>) {
+        let mut event = self.envelope(id, "result", outcome);
+        event["coreGeneration"] = generation.into();
+        event["revision"] = revision.into();
+        lock(&self.events).push_back(event);
+    }
     fn state(&self, store: &Store, runtime: &Value, id: &str) {
         let data = store.snapshot(runtime.clone());
         *lock(&self.snapshot) = data.clone();
         self.publish(id, "state", Ok(data));
     }
     fn stream(&self, generation: u64, stream: &str, outcome: Result<Value>) {
+        self.stream_inner(generation, None, stream, outcome);
+    }
+    fn stream_at_revision(&self, generation: u64, revision: u64, stream: &str, outcome: Result<Value>) {
+        self.stream_inner(generation, Some(revision), stream, outcome);
+    }
+    fn stream_inner(&self, generation: u64, expected_revision: Option<u64>, stream: &str, outcome: Result<Value>) {
         let snapshot = lock(&self.snapshot);
         if snapshot["runtime"]["coreGeneration"].as_u64() != Some(generation)
             || snapshot["runtime"]["status"] != "running"
+            || expected_revision.is_some_and(|revision| snapshot["revision"].as_u64() != Some(revision))
         {
             return;
         }
@@ -155,6 +168,12 @@ impl Shared {
                 json!({"version":1,"id":"","kind":"stream","coreGeneration":generation,"revision":revision,"ok":false,"error":{"code":"streamFailed","message":format!("{stream}: {error:#}")}})
             }
         };
+        let mut event = event;
+        event["timestamp"] = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64()
+            .into();
         let mut events = lock(&self.events);
         if events.len() < 256 {
             events.push_back(event);
@@ -335,6 +354,51 @@ impl Worker {
                 _ = health.tick() => { self.check_core_health().await; continue; },
             };
             let id = queued.request.id.clone();
+            if ["proxy.delay", "media.check", "media.checkAll"].contains(&queued.request.command.as_str())
+                && self.is_running()
+                && queued
+                    .request
+                    .core_generation
+                    .is_none_or(|generation| generation == self.generation())
+                && queued
+                    .request
+                    .revision
+                    .is_none_or(|revision| revision == self.store.revision)
+            {
+                self.controller.read_tasks.retain(|(_, task)| !task.is_finished());
+                let controller = self.controller.reader();
+                let shared = Arc::clone(&self.shared);
+                let generation = self.generation();
+                let revision = self.store.revision;
+                let port = self.store.settings.mixed_port;
+                let token = Arc::clone(&queued.cancellation);
+                let task = tokio::spawn(async move {
+                    let mut outcome = std::panic::AssertUnwindSafe(background_read(
+                        &controller,
+                        &shared,
+                        generation,
+                        revision,
+                        port,
+                        &queued.request,
+                        &queued.cancellation,
+                    ))
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("background read panicked")));
+                    {
+                        let current = lock(&shared.snapshot);
+                        if current["runtime"]["coreGeneration"].as_u64() != Some(generation) {
+                            outcome = Err(anyhow::anyhow!("stale core generation"));
+                        } else if current["revision"].as_u64() != Some(revision) {
+                            outcome = Err(anyhow::anyhow!("stale revision"));
+                        }
+                    }
+                    shared.publish_read_result(&id, generation, revision, outcome);
+                    lock(&shared.pending).remove(&id);
+                });
+                self.controller.read_tasks.push((token, task));
+                continue;
+            }
             let outcome = std::panic::AssertUnwindSafe(self.execute(&queued.request, &queued.cancellation))
                 .catch_unwind()
                 .await
@@ -517,25 +581,20 @@ impl Worker {
                 Ok(Value::Null)
             }
             "media.list" => Ok(serde_json::to_value(clash_verge_media_unlock::default_unlock_items())?),
-            "media.check" => {
+            "proxy.delay" | "media.check" | "media.checkAll" => {
                 if !self.is_running() {
                     bail!("owned core is stopped");
                 }
-                let proxy = reqwest::Proxy::all(format!("http://127.0.0.1:{}", self.store.settings.mixed_port))?;
-                let client = reqwest::Client::builder()
-                    .no_proxy()
-                    .proxy(proxy)
-                    .timeout(Duration::from_secs(15))
-                    .build()?;
-                let service = string(args, "service")?;
-                let result = cancel
-                    .run(async {
-                        clash_verge_media_unlock::check_media_unlock_item(&client, service)
-                            .await
-                            .map_err(anyhow::Error::msg)
-                    })
-                    .await?;
-                Ok(serde_json::to_value(result)?)
+                background_read(
+                    &self.controller,
+                    &self.shared,
+                    self.generation(),
+                    self.store.revision,
+                    self.store.settings.mixed_port,
+                    request,
+                    cancel,
+                )
+                .await
             }
             "backup.create" => self.backup_create().await,
             "backup.list" => self.backup_list().await,
@@ -624,6 +683,10 @@ impl Worker {
     async fn commit(&mut self, mut candidate: Store, id: &str, cancel: &Cancellation) -> Result<()> {
         candidate.revision = self.store.revision.checked_add(1).context("revision exhausted")?;
         candidate.validate()?;
+        let persisted_bytes = serde_json::to_vec_pretty(&candidate)?;
+        if persisted_bytes.len() > MAX_DOCUMENT_BYTES * 4 {
+            bail!("native state exceeds 64 MiB limit");
+        }
         let yaml = candidate.runtime_yaml(&self.controller.socket, &self.secret)?;
         let staged = self.options.data_dir.join("runtime-staged.yaml");
         atomic_write(&staged, yaml.as_bytes()).await?;
@@ -647,7 +710,7 @@ impl Worker {
             return Err(error);
         }
         let path = self.options.data_dir.join("state.json");
-        let persistence_warning = match atomic_write(&path, &serde_json::to_vec_pretty(&candidate)?).await {
+        let persistence_warning = match atomic_write(&path, &persisted_bytes).await {
             Ok(()) => None,
             Err(error) if error.downcast_ref::<config::CommittedWriteError>().is_some() => Some(error),
             Err(error) => {
@@ -911,3 +974,97 @@ fn decode_percent(text: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests;
+
+async fn background_read(
+    controller: &Controller,
+    shared: &Arc<Shared>,
+    generation: u64,
+    revision: u64,
+    port: u16,
+    request: &Request,
+    cancel: &Cancellation,
+) -> Result<Value> {
+    let args = &request.args;
+    match request.command.as_str() {
+        "proxy.delay" => {
+            let names: Vec<String> = serde_json::from_value(args.get("names").context("names required")?.clone())?;
+            if names.is_empty() || names.len() > 4096 {
+                bail!("delay batch must contain 1 to 4096 nodes");
+            }
+            let url = args
+                .get("url")
+                .and_then(Value::as_str)
+                .unwrap_or("https://www.gstatic.com/generate_204");
+            let parsed = reqwest::Url::parse(url)?;
+            if !["http", "https"].contains(&parsed.scheme()) {
+                bail!("delay URL must use HTTP(S)");
+            }
+            let mut seen = std::collections::HashSet::new();
+            let mut tasks = futures_util::stream::iter(names.into_iter().filter(|name| seen.insert(name.clone())).map(
+                |name| async move {
+                    let path = format!(
+                        "/proxies/{}/delay?timeout=5000&url={}",
+                        percent_encode(&name),
+                        percent_encode(url)
+                    );
+                    let value = controller.request("GET", &path, None).await;
+                    match value {
+                        Ok(value) => json!({"name":name,"delay":value["delay"],"url":url,"testedAt":now()}),
+                        Err(error) => {
+                            json!({"name":name,"delay":null,"url":url,"testedAt":now(),"error":format!("{error:#}")})
+                        }
+                    }
+                },
+            ))
+            .buffer_unordered(8);
+            cancel
+                .run(async {
+                    let mut results = Vec::new();
+                    while let Some(result) = tasks.next().await {
+                        shared.stream_at_revision(generation, revision, "delay", Ok(result.clone()));
+                        results.push(result);
+                    }
+                    Ok(json!(results))
+                })
+                .await
+        }
+        "media.check" => {
+            let proxy = reqwest::Proxy::all(format!("http://127.0.0.1:{}", port))?;
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .proxy(proxy)
+                .timeout(Duration::from_secs(15))
+                .build()?;
+            let service = string(args, "service")?;
+            let result = cancel
+                .run(async {
+                    clash_verge_media_unlock::check_media_unlock_item(&client, service)
+                        .await
+                        .map_err(anyhow::Error::msg)
+                })
+                .await?;
+            Ok(serde_json::to_value(result)?)
+        }
+        "media.checkAll" => {
+            let proxy = reqwest::Proxy::all(format!("http://127.0.0.1:{}", port))?;
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .proxy(proxy)
+                .timeout(Duration::from_secs(15))
+                .build()?;
+            let results = cancel
+                .run(async {
+                    let results = clash_verge_media_unlock::check_media_unlock(&client, |item| {
+                        if let Ok(value) = serde_json::to_value(item) {
+                            shared.stream_at_revision(generation, revision, "media", Ok(value));
+                        }
+                    })
+                    .await;
+                    Ok(results)
+                })
+                .await?;
+            Ok(serde_json::to_value(results)?)
+        }
+        _ => bail!("unsupported background operation"),
+    }
+}

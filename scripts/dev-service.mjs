@@ -52,7 +52,8 @@ export async function prepareDevelopmentService() {
   await access(serviceManifest)
   const env = {
     ...process.env,
-    CARGO_HOME: process.env.CARGO_HOME || join(repositoryRoot, '.work', 'cargo'),
+    CARGO_HOME:
+      process.env.CARGO_HOME || join(repositoryRoot, '.work', 'cargo'),
     TMPDIR: process.env.TMPDIR || join(repositoryRoot, '.work', 'tmp'),
     MACOSX_DEPLOYMENT_TARGET: '26.0',
   }
@@ -117,24 +118,17 @@ export async function prepareDevelopmentService() {
 export async function ensureDevelopmentService({
   platform = process.platform,
 } = {}) {
-  if (platform !== 'darwin') throw new Error('Development service requires macOS')
+  if (platform !== 'darwin')
+    throw new Error('Development service requires macOS')
   const serviceDirectory = await prepareDevelopmentService()
-  const installer = join(
-    serviceDirectory,
-    'clash-verge-service-install',
-  )
+  const installer = join(serviceDirectory, 'clash-verge-service-install')
   const host = 'aarch64-apple-darwin'
   const args = ['--prepare-install', '--ensure']
   for (const name of ['verge-mihomo', 'verge-mihomo-alpha']) {
     args.push(
       '--core',
       name,
-      join(
-        repositoryRoot,
-        'src-tauri',
-        'sidecar',
-        `${name}-${host}`,
-      ),
+      join(repositoryRoot, 'src-tauri', 'sidecar', `${name}-${host}`),
     )
   }
   await run(installer, args)

@@ -7,7 +7,7 @@ enum ClientPage: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .overview: "概览"
-        case .profiles: "配置"
+        case .profiles: "订阅"
         case .nodes: "节点"
         case .rules: "规则"
         case .activity: "活动"
@@ -30,7 +30,11 @@ enum ClientPage: String, CaseIterable, Identifiable {
     var page: ClientPage? = .overview
     var snapshot: CoreSnapshot?
     var loading = true
-    var busy = false
+    private var operations = 0
+    var testingNodes = false
+    @ObservationIgnored private var nodeTestTask: Task<Void, Never>?
+    @ObservationIgnored private var refreshing = false
+    var busy: Bool { operations > 0 }
     var failure: ClientFailure?
     var showImport = false
     var showFailure = false
@@ -52,6 +56,9 @@ enum ClientPage: String, CaseIterable, Identifiable {
     }
 
     func refresh() async {
+        guard !refreshing else { return }
+        refreshing = true
+        defer { refreshing = false }
         do {
             accept(try await transport.snapshot())
             if failure?.code == "transport_error" { failure = nil }
@@ -61,14 +68,18 @@ enum ClientPage: String, CaseIterable, Identifiable {
     }
 
     func command(_ name: String, payload: [String: String] = [:]) async {
-        guard !busy else { return }
-        busy = true
-        defer { busy = false }
+        operations += 1
+        let testing = name == "testAllNodes" || name == "testNode"
+        if testing { testingNodes = true }
+        defer { operations -= 1; if testing { testingNodes = false } }
         do {
             let result = try await transport.execute(CommandEnvelope(expectedGeneration: snapshot?.generation, command: name, payload: payload))
             failure = nil
             accept(result)
-        } catch { record(error); showFailure = !showImport }
+        } catch {
+            await refresh()
+            if !(error is CancellationError) { record(error); showFailure = !showImport }
+        }
     }
 
     func importProfile(name: String, source: String) async {
@@ -76,11 +87,24 @@ enum ClientPage: String, CaseIterable, Identifiable {
         if failure == nil { showImport = false }
     }
 
+    func testNodes(nodeID: String? = nil) {
+        guard !testingNodes else { return }
+        nodeTestTask = Task {
+            await command(nodeID == nil ? "testAllNodes" : "testNode", payload: nodeID.map { ["nodeID": $0] } ?? [:])
+            nodeTestTask = nil
+        }
+    }
+    func cancelNodeTests() { nodeTestTask?.cancel() }
+
+    func shutdown() async { await transport.shutdown() }
+
     private func accept(_ incoming: CoreSnapshot) {
         guard SnapshotOrdering.accepts(incoming, after: snapshot) else { return }
         snapshot = incoming
         if let error = incoming.error { failure = error }
     }
+
+    func report(_ error: Error) { record(error); showFailure = true }
 
     private func record(_ error: Error) {
         failure = (error as? ClientFailure) ?? ClientFailure(code: "transport_error", message: "无法读取内核状态", detail: error.localizedDescription, retryable: true)

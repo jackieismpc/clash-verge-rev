@@ -1,17 +1,32 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct NodesView: View {
     @Bindable var model: AppModel
     @ViewState private var selection: Set<String> = []
     @ViewState private var sortOrder = [KeyPathComparator(\NodeRecord.name)]
+    @ViewState private var frozenOrder: [String] = []
     private var nodes: [NodeRecord] {
-        (model.snapshot?.nodes ?? []).filter {
+        let records = (model.snapshot?.nodes ?? []).filter {
             model.query.isEmpty || "\($0.name) \($0.kind) \($0.group)".localizedCaseInsensitiveContains(model.query)
-        }.sorted(using: sortOrder)
+        }
+        if model.testingNodes {
+            let positions = Dictionary(uniqueKeysWithValues: frozenOrder.enumerated().map { ($0.element, $0.offset) })
+            return records.sorted { (positions[$0.id] ?? Int.max) < (positions[$1.id] ?? Int.max) }
+        }
+        return records.sorted(using: sortOrder)
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            pageHeader("节点", subtitle: "单击查看详情，双击或按回车使用节点。")
+            HStack {
+                pageHeader("节点", subtitle: "单击查看详情，双击或按回车使用节点。")
+                Spacer()
+                if model.testingNodes {
+                    Button("取消测速") { model.cancelNodeTests() }
+                }
+                Button(model.testingNodes ? "测速中…" : "全部测速") { model.testNodes() }
+                    .disabled(model.isDemo || model.busy || model.snapshot?.coreStatus != "running")
+            }
             if nodes.isEmpty {
                 emptyState("暂无匹配节点", "尝试其他搜索词，或导入包含节点的配置。", symbol: "point.3.connected.trianglepath.dotted")
             } else {
@@ -29,11 +44,13 @@ struct NodesView: View {
                         Text(node.latencyMS.map { "\($0) ms" } ?? "—")
                             .monospacedDigit().foregroundStyle(node.available ? Color.primary : Color.secondary)
                     }.width(80)
-                    TableColumn("状态") { node in Text(node.available ? "可用" : "不可用") }.width(70)
+                    TableColumn("状态") { node in Text(node.available ? (node.latencyMS == nil ? "未检测" : "可用") : "不可用") }.width(70)
                 }
                 .contextMenu(forSelectionType: String.self) { ids in
                     Button("使用节点") { use(ids) }.disabled(ids.count != 1 || model.busy)
                     Button("查看详情") { model.inspectedNodeID = ids.first }.disabled(ids.count != 1)
+                    Button("测速") { if let id = ids.first { model.testNodes(nodeID: id) } }
+                        .disabled(ids.count != 1 || model.isDemo || model.busy)
                 } primaryAction: { ids in use(ids) }
                 .onChange(of: selection) { _, ids in model.inspectedNodeID = ids.first }
                 .onKeyPress(.return) { use(selection); return .handled }
@@ -45,6 +62,10 @@ struct NodesView: View {
                             Text(node.name).font(.system(size: 14, weight: .semibold)).textSelection(.enabled)
                             Text("\(node.kind) · \(node.group) · \(node.available ? "可用" : "不可用")")
                                 .font(.system(size: 12)).foregroundStyle(.secondary)
+                            if let date = node.testedAt {
+                                Text("\(node.testURL ?? "") · \(Date(timeIntervalSince1970: date).formatted(date: .omitted, time: .standard))")
+                                    .font(.system(size: 12)).foregroundStyle(.secondary).textSelection(.enabled)
+                            }
                         }
                         Spacer()
                         Button(model.snapshot?.selectedNodeID == node.id ? "正在使用" : "使用节点") { use([node.id]) }
@@ -53,6 +74,9 @@ struct NodesView: View {
                 }
             }
         }.padding(24)
+            .onChange(of: model.testingNodes) { _, testing in
+                if testing { frozenOrder = (model.snapshot?.nodes ?? []).sorted(using: sortOrder).map(\.id) }
+            }
     }
     private func use(_ ids: Set<String>) {
         guard ids.count == 1, let id = ids.first else { return }
@@ -62,6 +86,9 @@ struct NodesView: View {
 
 struct ProfilesView: View {
     @Bindable var model: AppModel
+    @ViewState private var editing: ProfileRecord?
+    @ViewState private var removing: ProfileRecord?
+    @ViewState private var importFile = false
     private var profiles: [ProfileRecord] {
         (model.snapshot?.profiles ?? []).filter { model.query.isEmpty || $0.name.localizedCaseInsensitiveContains(model.query) }
     }
@@ -69,8 +96,9 @@ struct ProfilesView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 HStack {
-                    pageHeader("配置", subtitle: "由 Rust 内核统一管理配置事务。")
+                    pageHeader("订阅", subtitle: "订阅与本地配置，验证通过后保存并生效。")
                     Spacer()
+                    Button("导入文件…") { importFile = true }
                     Button("导入配置…") { model.showImport = true }
                 }
                 if profiles.isEmpty { emptyState("暂无配置", "导入本地 YAML 或订阅地址后显示在这里。", symbol: "doc.badge.plus") }
@@ -89,10 +117,37 @@ struct ProfilesView: View {
                             Spacer()
                             if profile.active { Label("当前配置", systemImage: "checkmark.circle.fill").font(.system(size: 12)).foregroundStyle(.tint) }
                             else { Button("使用") { Task { await model.command("selectProfile", payload: ["profileID": profile.id]) } }.disabled(model.busy) }
+                            Menu {
+                                Button("编辑…") { editing = profile }
+                                Button("更新订阅") { Task { await model.command("updateProfile", payload: ["profileID": profile.id]) } }
+                                    .disabled(!profile.source.hasPrefix("http") || model.isDemo)
+                                Divider()
+                                Button("删除…", role: .destructive) { removing = profile }
+                            } label: { Image(systemName: "ellipsis") }.disabled(model.busy)
                         }
                     }
                 }
             }.padding(24)
+        }
+        .sheet(item: $editing) { profile in ProfileEditor(model: model, profile: profile) }
+        .confirmationDialog("删除配置“\(removing?.name ?? "")”？", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } })) {
+            Button("删除", role: .destructive) {
+                if let profile = removing { Task { await model.command("deleteProfile", payload: ["profileID": profile.id]) } }
+                removing = nil
+            }
+        }
+        .fileImporter(isPresented: $importFile, allowedContentTypes: [UTType(filenameExtension: "yaml") ?? .plainText, UTType(filenameExtension: "yml") ?? .plainText]) { result in
+            Task {
+                do {
+                    let url = try result.get()
+                    let access = url.startAccessingSecurityScopedResource()
+                    defer { if access { url.stopAccessingSecurityScopedResource() } }
+                    let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+                    guard size <= 16 * 1024 * 1024 else { throw ClientFailure(code: "file_too_large", message: "配置文件超过 16 MiB", detail: url.lastPathComponent, retryable: false) }
+                    let yaml = try String(contentsOf: url, encoding: .utf8)
+                    await model.command("importProfile", payload: ["name": url.deletingPathExtension().lastPathComponent, "yaml": yaml])
+                } catch { model.report(error) }
+            }
         }
     }
 }
@@ -174,20 +229,57 @@ struct UnlockView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                pageHeader("解锁检测", subtitle: "检查结果需要真实网络请求，不从节点名称推断。")
-                SurfaceCard {
-                    VStack(alignment: .leading, spacing: 16) {
-                        Label("尚未运行检测", systemImage: "lock.open").font(.system(size: 18, weight: .medium))
-                        Text(model.isDemo ? "演示模式不会发起媒体服务检测请求。连接真实内核后，可按服务执行检测并查看结果。" : "选择服务后由 Rust 内核执行检查。")
-                            .font(.system(size: 14)).foregroundStyle(.secondary)
+                HStack {
+                    pageHeader("解锁检测", subtitle: "通过当前代理检测服务可用性与地区。")
+                    Spacer()
+                    Button("全部检测") { Task { await model.command("checkAllMedia") } }
+                        .disabled(model.isDemo || model.busy || model.snapshot?.coreStatus != "running")
+                }
+                if model.isDemo { emptyState("演示模式", "真实检测需要启动内核。", symbol: "lock.open") }
+                ForEach(model.snapshot?.unlock ?? []) { item in
+                    SurfaceCard {
                         HStack {
-                            Button("检测 YouTube") { Task { await model.command("checkMedia", payload: ["service": "youtube"]) } }
-                            Button("检测 Netflix") { Task { await model.command("checkMedia", payload: ["service": "netflix"]) } }
-                        }.disabled(model.isDemo || model.busy)
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(item.id).font(.system(size: 14, weight: .semibold))
+                                Text(item.region ?? "地区未知").font(.system(size: 12)).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            VStack(alignment: .trailing, spacing: 8) {
+                                Text(item.status == "Pending" ? "尚未检测" : item.status)
+                                Text(item.checkedAt ?? "").font(.system(size: 12)).foregroundStyle(.secondary)
+                            }
+                            Button("检测") { Task { await model.command("checkMedia", payload: ["service": item.id]) } }
+                                .disabled(model.isDemo || model.busy || model.snapshot?.coreStatus != "running")
+                        }
                     }
                 }
             }.padding(24)
         }
+    }
+}
+
+struct ProfileEditor: View {
+    @Bindable var model: AppModel
+    let profile: ProfileRecord
+    @Environment(\.dismiss) private var dismiss
+    @ViewState private var yaml = ""
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("编辑 \(profile.name)").font(.title2)
+            TextEditor(text: $yaml).font(.system(size: 12, design: .monospaced)).frame(minHeight: 320)
+            if let error = model.failure { Text(error.detail).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
+            HStack {
+                Spacer()
+                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("保存") {
+                    Task {
+                        await model.command("updateProfile", payload: ["profileID": profile.id, "yaml": yaml])
+                        if model.failure == nil { dismiss() }
+                    }
+                }.keyboardShortcut(.defaultAction).disabled(model.busy || model.isDemo)
+            }
+        }.padding(24).frame(width: 700, height: 480)
+            .onAppear { yaml = model.snapshot?.profileDocuments[profile.id] ?? "" }
     }
 }
 

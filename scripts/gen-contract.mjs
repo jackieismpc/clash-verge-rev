@@ -1,6 +1,5 @@
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 
 const ROOT = path.resolve(import.meta.dirname, '..')
@@ -11,9 +10,9 @@ if (args.length > 1 || (args.length === 1 && args[0] !== '--check')) {
   process.exit(2)
 }
 const check = args[0] === '--check'
-const temporary = check
-  ? fs.mkdtempSync(path.join(os.tmpdir(), 'verge-contract-'))
-  : null
+const scratch = path.join(ROOT, '.work', 'contracts')
+fs.mkdirSync(scratch, { recursive: true })
+const temporary = check ? fs.mkdtempSync(path.join(scratch, 'check-')) : null
 const output = temporary ? path.join(temporary, 'bindings.ts') : BINDINGS
 try {
   execFileSync(

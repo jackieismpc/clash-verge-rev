@@ -1,9 +1,11 @@
+use crate::Cancellation;
 use anyhow::{Context, Result, bail};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
+    sync::Arc,
     time::Duration,
 };
 use tokio::{
@@ -22,6 +24,8 @@ pub struct Controller {
     client: reqwest::Client,
     pub child: Option<Child>,
     pub streams: Vec<JoinHandle<()>>,
+    pub(crate) read_tasks: Vec<(Arc<Cancellation>, JoinHandle<()>)>,
+    delay_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl Controller {
@@ -37,13 +41,32 @@ impl Controller {
             client,
             child: None,
             streams: vec![],
+            read_tasks: vec![],
+            delay_slots: Arc::new(tokio::sync::Semaphore::new(8)),
         })
+    }
+
+    pub fn reader(&self) -> Self {
+        Self {
+            socket: self.socket.clone(),
+            secret: self.secret.clone(),
+            client: self.client.clone(),
+            child: None,
+            streams: vec![],
+            read_tasks: vec![],
+            delay_slots: Arc::clone(&self.delay_slots),
+        }
     }
 
     pub async fn request(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value> {
         if !path.starts_with('/') || path.starts_with("//") || path.contains('#') || path.contains("..") {
             bail!("invalid controller path");
         }
+        let _permit = if path.contains("/delay?") {
+            Some(self.delay_slots.acquire().await.context("delay scheduler stopped")?)
+        } else {
+            None
+        };
         let method = reqwest::Method::from_bytes(method.as_bytes())?;
         let mut request = self
             .client
@@ -139,6 +162,12 @@ impl Controller {
 
     pub async fn stop(&mut self) -> Result<()> {
         self.unsubscribe();
+        for (cancel, _) in &self.read_tasks {
+            cancel.cancel();
+        }
+        for (_, task) in self.read_tasks.drain(..) {
+            let _ = task.await;
+        }
         if let Some(child) = self.child.as_mut() {
             if child.try_wait()?.is_none() {
                 child.kill().await?;

@@ -3,10 +3,7 @@
   "identifier": "io.github.jackieismpc.clash-verge-native",
   "productName": "Clash Verge Native",
   "bundle": {
-    "targets": [
-      "app",
-      "dmg"
-    ],
+    "targets": ["app", "dmg"],
     "macOS": {
       "frameworks": [],
       "minimumSystemVersion": "26.0",

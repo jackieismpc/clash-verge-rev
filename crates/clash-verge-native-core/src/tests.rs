@@ -268,3 +268,172 @@ fn ffi_allocations_null_inputs_shutdown_and_directory_release() {
         ffi::cvn_destroy(reopened);
     }
 }
+
+#[tokio::test]
+async fn delay_batch_runs_concurrently_and_publishes_each_result() {
+    let dir = TestDir::new();
+    let socket = dir.0.join("c.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let barrier = Arc::new(tokio::sync::Barrier::new(6));
+    let fixture = tokio::spawn(async move {
+        let mut handlers = tokio::task::JoinSet::new();
+        for _ in 0..6 {
+            let (mut connection, _) = listener.accept().await.unwrap();
+            let barrier = Arc::clone(&barrier);
+            handlers.spawn(async move {
+                let mut bytes = Vec::new();
+                loop {
+                    let mut buffer = [0_u8; 4096];
+                    let count = connection.read(&mut buffer).await.unwrap();
+                    assert_ne!(count, 0);
+                    bytes.extend_from_slice(&buffer[..count]);
+                    if bytes.windows(4).any(|window| window == b"\r\n\r\n") { break; }
+                }
+                let header = String::from_utf8(bytes).unwrap();
+                assert!(header.contains("%20node/delay?timeout=5000&url=http%3A%2F%2Ffixture%2Fpath%3Fx%3D1"));
+                barrier.wait().await;
+                connection.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 12\r\nConnection: close\r\n\r\n{\"delay\":42}").await.unwrap();
+            });
+        }
+        while let Some(handler) = handlers.join_next().await {
+            handler.unwrap();
+        }
+    });
+    let store = Store::new(19885);
+    let mut runtime_state = stopped("owner", 1, &socket, 19885);
+    runtime_state["status"] = "running".into();
+    let shared = Arc::new(Shared {
+        snapshot: Mutex::new(store.snapshot(runtime_state.clone())),
+        events: Mutex::new(VecDeque::new()),
+        pending: Mutex::new(HashMap::new()),
+        stopping: AtomicBool::new(false),
+        shutdown: Notify::new(),
+    });
+    let mut worker = Worker {
+        options: dir.options(),
+        store,
+        runtime_state,
+        controller: Controller::new(socket, "secret".into()).unwrap(),
+        secret: "secret".into(),
+        shared: Arc::clone(&shared),
+    };
+    let names: Vec<String> = (0..6).map(|index| format!("{index} node")).collect();
+    let request = request(
+        "delay",
+        "proxy.delay",
+        json!({"names":names,"url":"http://fixture/path?x=1"}),
+    );
+    let results = tokio::time::timeout(
+        Duration::from_secs(3),
+        worker.execute(&request, &Cancellation::default()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(results.as_array().unwrap().len(), 6);
+    assert!(results.as_array().unwrap().iter().all(|value| value["delay"] == 42));
+    assert_eq!(lock(&shared.events).len(), 6);
+    assert!(
+        lock(&shared.events)
+            .iter()
+            .all(|event| event["data"]["stream"] == "delay" && event["timestamp"].is_number())
+    );
+    fixture.await.unwrap();
+}
+
+#[tokio::test]
+async fn slow_delay_does_not_block_snapshot_or_owned_stop() {
+    let dir = TestDir::new();
+    let socket = dir.0.join("c.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let (connected, ready) = tokio::sync::oneshot::channel();
+    let fixture = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut header = [0_u8; 4096];
+        let _ = stream.read(&mut header).await.unwrap();
+        connected.send(()).unwrap();
+        let mut remainder = Vec::new();
+        stream.read_to_end(&mut remainder).await.unwrap();
+    });
+    let store = Store::new(19886);
+    let mut runtime_state = stopped("owner", 1, &socket, 19886);
+    runtime_state["status"] = "running".into();
+    let shared = Arc::new(Shared {
+        snapshot: Mutex::new(store.snapshot(runtime_state.clone())),
+        events: Mutex::new(VecDeque::new()),
+        pending: Mutex::new(HashMap::new()),
+        stopping: AtomicBool::new(false),
+        shutdown: Notify::new(),
+    });
+    let mut worker = Worker {
+        options: dir.options(),
+        store,
+        runtime_state,
+        controller: Controller::new(socket, "secret".into()).unwrap(),
+        secret: "secret".into(),
+        shared: Arc::clone(&shared),
+    };
+    let (sender, receiver) = mpsc::channel(8);
+    let owner = tokio::spawn(async move { worker.serve(receiver).await });
+    sender
+        .send(Queued {
+            request: request("delay", "proxy.delay", json!({"names":["slow"]})),
+            cancellation: Arc::new(Cancellation::default()),
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), ready)
+        .await
+        .unwrap()
+        .unwrap();
+    sender
+        .send(Queued {
+            request: request("read", "snapshot", json!({})),
+            cancellation: Arc::new(Cancellation::default()),
+        })
+        .await
+        .unwrap();
+    sender
+        .send(Queued {
+            request: request("stop", "runtime.stop", json!({})),
+            cancellation: Arc::new(Cancellation::default()),
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while lock(&shared.events)
+            .iter()
+            .filter(|event| event["kind"] == "result")
+            .count()
+            < 3
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    {
+        let events = lock(&shared.events);
+        assert!(
+            events
+                .iter()
+                .any(|event| event["id"] == "read" && event["kind"] == "result" && event["ok"] == true)
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event["id"] == "stop" && event["kind"] == "result" && event["ok"] == true)
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event["id"] == "delay" && event["error"]["code"] == "cancelled")
+        );
+    }
+    shared.shutdown.notify_one();
+    owner.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), fixture)
+        .await
+        .unwrap()
+        .unwrap();
+}

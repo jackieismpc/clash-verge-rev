@@ -17,8 +17,6 @@ async fn create_client() -> Result<Client, String> {
         .use_rustls_tls()
         .http1_only()
         .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
-        .danger_accept_invalid_certs(true)
-        .danger_accept_invalid_hostnames(true)
         .tcp_keepalive(Duration::from_secs(60))
         .cookie_store(true)
         .proxy(proxy)

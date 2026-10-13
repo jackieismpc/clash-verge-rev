@@ -1,23 +1,29 @@
 # Native macOS presentation
 
 This Swift package is the independently maintained native presentation layer.
-It targets Apple Silicon and macOS 26 or later. The existing Tauri client remains
-available while retained workflows migrate. The default transport is explicitly
-labelled demonstration data: it does not start a proxy, download subscriptions,
-or change operating-system network settings.
+It targets Apple Silicon and macOS 26 or later. The default transport loads the
+bundled Rust business library and uses a project-local development data directory,
+controller socket and port. The core starts only after an explicit action. It
+never changes OS proxy, DNS or TUN settings in this stage. `--demo` selects the
+clearly labelled visual fixture instead.
 
 ## Build and run
 
 From the repository root, using the installed Command Line Tools (Swift 6.2+):
 
 ```sh
+node scripts/native-core-assets.mjs
+scripts/native-core-build.sh build
 scripts/native-ui-build.sh
 open '.work/native-ui/Clash Native.app'
 scripts/native-ui-test.sh
+# Visual fixture only:
+open -n '.work/native-ui/Clash Native.app' --args --demo
 ```
 
 The scripts scope temporary files, SwiftPM configuration, caches, and generated
-app bundles to `.work/native-ui`. The bundle receives an ad-hoc local code
+app bundles to `.work/native-ui`. Rust outputs and the verified pinned mihomo
+archive live in `.work/target` and `.work/engines`; they are never Git inputs. The bundle receives an ad-hoc local code
 signature; distribution signing and notarization are separate release tasks.
 No global Swift, Cargo, Xcode, shell, or proxy configuration is modified.
 
@@ -68,11 +74,27 @@ UI command names and payloads:
 | `clearLogs` | empty; clear the current UI log buffer |
 | `checkMedia` | `service` |
 
-The real Rust adapter must map these presentation commands to the native core's
-versioned C ABI and decode runtime, profile, controller, and stream data. Demo
-transport rejects unsupported actions and stale generation commands. Capability
-availability must come from the real transport, and operating-system actions
-must never be inferred from the appearance of a toggle.
+`NativeCoreTransport.swift` loads the versioned C ABI on its actor executor, frees
+returned buffers, drains ordered events and projects runtime/controller data.
+Rust serializes writes. Swift preserves distinct commands instead of dropping
+new intents behind a global busy flag. Snapshots coalesce ordinary refreshes.
+Quit waits for pending operations and owned core cleanup; closing the window
+keeps the core and menu bar alive. `CVN_LIBRARY_PATH`, `CVN_MIHOMO_PATH` and
+`CVN_DATA_DIRECTORY` can select isolated development inputs per child process.
+
+Subscriptions support URL/YAML/file import, update, selection, editing and
+delete. Nodes support individual and batch tests, cancellation and stable row
+ordering during tests. The single shared Rust scheduler bounds tests to eight
+requests, with no random or minimum slot delay. Late results are rejected after
+core generation or configuration revision changes. The original media checker
+list is used for individual and bounded parallel whole-list checks, with normal
+TLS verification. Native JSON backups can be listed, created and restored.
+
+Network settings currently expose core start/stop/mode and persistent YAML
+overrides. System proxy/TUN/helper remain explicitly unavailable pending their
+Mac adapter. Old ZIP backup import and subscription schedules are unfinished.
+Login startup uses `SMAppService` only when the user changes its toggle;
+registration, distribution signing and notarization require product validation.
 
 ## Validation
 
@@ -80,5 +102,10 @@ Swift tests verify snapshot generation/sequence ordering and schema rejection,
 missing-sample chart segments, unavailable-node and stale-command rejection, and
 JSON round trips. Native accessibility and visual inspection cover the overview,
 table single-click/double-click behavior, search empty state, and demo import.
-Full privileged proxy/TUN/helper functionality is outside the demo transport and
-is not claimed by this presentation package.
+A real Swift → C ABI → Rust → pinned arm64 mihomo integration test validates
+YAML import, lifecycle, groups containing spaces, node selection, rules, backup
+restore and persistence after reopen. Integration uses temporary project-local
+data and an ephemeral loopback port. OS proxy/TUN/helper and legacy migration
+workflows remain unvalidated. AppKit content bitmap exports cannot represent
+composited glass/sidebars, so they are not treated as final visual acceptance.
+Review the runnable native window for materials and accessibility.

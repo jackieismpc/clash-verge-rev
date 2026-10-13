@@ -23,7 +23,11 @@ Only the owned child and socket are stopped or removed. Consumers free every
 returned string exactly once and never access a handle concurrently with destroy.
 Create and destroy perform I/O and belong on a background executor.
 
-Mutations serialize in Rust. Validate and stage configuration before applying
+Mutations serialize in Rust. Delay/media checks run separately from writes;
+stop cancels and joins owned reads. Delay requests share eight concurrency slots
+across batches, preserve complete test URLs, and publish each result without
+random waits or minimum slot occupancy. Generation/revision checks reject late
+batch results. Validate and stage configuration before applying
 it. Failure before persistence restores the prior runtime; replacement that
 already committed stays authoritative even if directory durability confirmation
 fails. Generation checks reject callbacks and commands from an older core.

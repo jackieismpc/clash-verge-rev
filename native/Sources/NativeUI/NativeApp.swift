@@ -4,8 +4,32 @@ import SwiftUI
 // Keep the stable property wrapper explicit so this package builds without Xcode.
 typealias ViewState<Value> = SwiftUI.State<Value>
 
-@main struct NativeApp: App {
-    @ViewState private var model = AppModel(transport: DemoTransport())
+@MainActor final class NativeAppDelegate: NSObject, NSApplicationDelegate {
+    static var model: AppModel?
+    private var terminating = false
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !terminating else { return .terminateLater }
+        terminating = true
+        Task {
+            await Self.model?.shutdown()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+}
+
+@main @MainActor struct NativeApp: App {
+    @NSApplicationDelegateAdaptor(NativeAppDelegate.self) private var delegate
+    @ViewState private var model: AppModel
+
+    init() {
+        let transport: any CoreTransport = CommandLine.arguments.contains("--demo")
+            ? DemoTransport() : NativeCoreTransport(options: .application())
+        let model = AppModel(transport: transport)
+        _model = ViewState(initialValue: model)
+        NativeAppDelegate.model = model
+    }
 
     var body: some Scene {
         Window("Clash Native", id: "main") {
@@ -14,6 +38,7 @@ typealias ViewState<Value> = SwiftUI.State<Value>
                 .task { await model.poll() }
         }
         .defaultSize(width: 1280, height: 820)
+        .defaultLaunchBehavior(.presented)
         .windowToolbarStyle(.unified)
         .commands {
             CommandGroup(after: .newItem) {
@@ -23,10 +48,12 @@ typealias ViewState<Value> = SwiftUI.State<Value>
                     .keyboardShortcut("r")
             }
         }
-        MenuBarExtra("Clash Native", systemImage: "network") {
+        MenuBarExtra {
             MenuContent(model: model)
+        } label: {
+            NativeMenuLabel()
         }
-        Settings { PreferencesView(model: model) }
+        Settings { NativePreferencesView(model: model) }
     }
 }
 
@@ -43,41 +70,6 @@ struct MenuContent: View {
         Divider()
         Button("退出 Clash Native") { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q")
-    }
-}
-
-struct PreferencesView: View {
-    @Bindable var model: AppModel
-    @AppStorage("nativeAppearance") private var appearance = "system"
-    var body: some View {
-        Form {
-            Section("外观") {
-                Picker("颜色模式", selection: $appearance) {
-                    Text("跟随系统").tag("system")
-                    Text("浅色").tag("light")
-                    Text("深色").tag("dark")
-                }
-                Text("透明度、动态效果与对比度遵循 macOS 辅助功能设置。")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Section("运行状态") {
-                LabeledContent("数据来源", value: model.isDemo ? "演示样本" : "Rust 内核桥接")
-                Picker("出站模式", selection: Binding(get: { model.snapshot?.mode ?? "rule" }, set: { mode in Task { await model.command("setMode", payload: ["mode": mode]) } })) {
-                    Text("规则模式").tag("rule")
-                    Text("全局模式").tag("global")
-                    Text("直连模式").tag("direct")
-                }.disabled(model.busy)
-                HStack {
-                    Button("启动内核") { Task { await model.command("startCore") } }
-                    Button("停止内核") { Task { await model.command("stopCore") } }
-                }.disabled(model.isDemo || model.busy)
-                Text(model.isDemo ? "演示操作仅更新内存中的样本，不会启动代理、下载订阅或修改系统网络。" : "状态和命令由独立 Rust 内核管理。")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-        }
-        .formStyle(.grouped)
-        .padding(20)
-        .frame(width: 480, height: 410)
     }
 }
 
@@ -102,8 +94,8 @@ struct RootView: View {
             .navigationSplitViewColumnWidth(min: 208, ideal: 224, max: 256)
             .safeAreaInset(edge: .bottom) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Label(model.isDemo ? "演示样本" : "内核桥接", systemImage: model.isDemo ? "sparkles" : "network")
-                    Text(model.isDemo ? "未修改系统网络" : "独立运行目录")
+                    Label(model.isDemo ? "演示样本" : "原生客户端", systemImage: model.isDemo ? "sparkles" : "network")
+                    Text(model.isDemo ? "未修改系统网络" : "本地配置与状态")
                         .font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 .font(.system(size: 14))
@@ -137,11 +129,11 @@ struct RootView: View {
                     pageContent
                 }
             }
-            .background(Color(nsColor: .windowBackgroundColor))
+            .background(Color(nsColor: .windowBackgroundColor).overlay(Color.indigo.opacity(0.035)))
             .navigationTitle(model.page?.title ?? "概览")
             .toolbar {
                 ToolbarItem(placement: .principal) {
-                    StatusPill(demo: model.isDemo, reduceTransparency: reduceTransparency)
+                    StatusPill(demo: model.isDemo, status: model.snapshot?.coreStatus ?? "stopped", reduceTransparency: reduceTransparency)
                 }
                 ToolbarItemGroup(placement: .primaryAction) {
                     Button { Task { await model.refresh() } } label: { Label("刷新", systemImage: "arrow.clockwise") }
@@ -174,13 +166,30 @@ struct RootView: View {
 
 struct StatusPill: View {
     var demo: Bool
+    var status: String
     var reduceTransparency: Bool
+    private var label: String {
+        if demo { return "演示 · 代理未启动" }
+        switch status { case "running": return "运行中"; case "starting": return "启动中"; case "failed": return "需要修复"; default: return "未运行" }
+    }
     var body: some View {
-        Label(demo ? "演示 · 代理未启动" : "内核状态", systemImage: demo ? "circle.dotted" : "circle.fill")
+        Label(label, systemImage: demo || status == "stopped" ? "circle.dotted" : "circle.fill")
+            .foregroundStyle(status == "running" ? Color.green : status == "failed" ? Color.orange : Color.secondary)
             .labelStyle(.titleAndIcon)
             .font(.system(size: 12))
             .padding(.horizontal, 12).padding(.vertical, 7)
             .background(reduceTransparency ? Color(nsColor: .controlBackgroundColor) : .clear, in: Capsule())
             .glassEffect(.regular, in: Capsule())
+    }
+}
+
+struct NativeMenuLabel: View {
+    @Environment(\.openWindow) private var openWindow
+    @ViewState private var opened = false
+    var body: some View {
+        Image(systemName: "network")
+            .task {
+                if !opened { opened = true; openWindow(id: "main") }
+            }
     }
 }

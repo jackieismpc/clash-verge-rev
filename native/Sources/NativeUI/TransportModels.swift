@@ -7,6 +7,8 @@ struct NodeRecord: Codable, Identifiable, Sendable, Hashable {
     var group: String
     var latencyMS: Int?
     var available: Bool
+    var testedAt: Double? = nil
+    var testURL: String? = nil
     var latencySort: Int { latencyMS ?? Int.max }
 }
 
@@ -57,6 +59,19 @@ struct ClientFailure: Codable, Identifiable, Sendable, Hashable, Error {
     var id: String { code + message }
 }
 
+struct UnlockRecord: Codable, Identifiable, Sendable, Hashable {
+    var id: String
+    var status: String
+    var region: String?
+    var checkedAt: String?
+}
+
+struct BackupRecord: Codable, Identifiable, Sendable, Hashable {
+    var id: String
+    var createdAt: Double
+    var bytes: UInt64
+}
+
 struct CoreSnapshot: Codable, Sendable {
     var schemaVersion: Int = 1
     var generation: UInt64
@@ -71,6 +86,10 @@ struct CoreSnapshot: Codable, Sendable {
     var logs: [LogRecord]
     var traffic: [TrafficSample]
     var error: ClientFailure?
+    var unlock: [UnlockRecord] = []
+    var backups: [BackupRecord] = []
+    var overrides: String = "{}"
+    var profileDocuments: [String: String] = [:]
 }
 
 struct CommandEnvelope: Codable, Sendable {
@@ -85,6 +104,11 @@ protocol CoreTransport: Sendable {
     var isDemo: Bool { get }
     func snapshot() async throws -> CoreSnapshot
     func execute(_ command: CommandEnvelope) async throws -> CoreSnapshot
+    func shutdown() async
+}
+
+extension CoreTransport {
+    func shutdown() async {}
 }
 
 enum SnapshotOrdering {

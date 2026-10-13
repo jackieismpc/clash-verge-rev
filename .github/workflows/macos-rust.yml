@@ -49,3 +49,9 @@ jobs:
       - run: cargo check --workspace --all-targets --all-features --locked
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --all-features --locked
+      - name: Native arm64 application and integration
+        run: |
+          node scripts/native-core-assets.mjs
+          scripts/native-core-build.sh build
+          scripts/native-ui-build.sh
+          scripts/native-ui-test.sh

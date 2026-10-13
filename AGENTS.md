@@ -12,6 +12,9 @@ required. Preserve the GPL license, source attribution, and Git history.
   project toolchains. Keep build outputs, fixtures, and reports in `.work`.
   Configure Git locally and build environments per child process; do not change
   global shell or Xcode settings.
+- Development and builds are local only. Do not add containers, cross-compilation,
+  hosted CI, release bots, or duplicated AI-tool instruction files. Keep the
+  mihomo update implementation until a separate core replacement is approved.
 - Do not stop, reconfigure, or take ownership of the user's daily proxy. Use
   separate application data, controller sockets, ports, and service channels.
 - Keep the existing UI usable until all retained workflows work in SwiftUI.
@@ -25,6 +28,7 @@ required. Preserve the GPL license, source attribution, and Git history.
 - Run meaningful existing checks and focused regression tests. Do not add
   unrelated formatting, dependency upgrades, speculative frameworks, or reports
   to commits. Document copyable build and usage instructions.
+  Use `scripts/check-local.sh` for native checks; legacy checks remain in README.md.
 - Generated contracts remain owned by their producer. Update all consumers when
   changing a command, event, field, or configuration format.
 - Code and comments are English. User-facing text may be Chinese. Keep comments

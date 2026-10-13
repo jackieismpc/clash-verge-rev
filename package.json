@@ -3,7 +3,6 @@
   "version": "2.5.9",
   "license": "GPL-3.0-only",
   "scripts": {
-    "prepare": "husky || true",
     "dev": "node scripts/dev.mjs dev",
     "dev:service": "node scripts/dev.mjs service",
     "dev:sidecar": "node scripts/dev.mjs sidecar",
@@ -17,9 +16,6 @@
     "web:build": "tsc --noEmit && vite build",
     "web:serve": "vite preview",
     "prebuild": "node scripts/prebuild.mjs",
-    "release-version": "node scripts/release-version.mjs",
-    "release:autobuild": "pnpm release-version autobuild",
-    "release:deploytest": "pnpm release-version deploytest",
     "eslint": "pnpm lint",
     "lint": "eslint -c eslint.config.ts --max-warnings=0 --cache --cache-location .eslintcache src",
     "lint:fix": "eslint -c eslint.config.ts --max-warnings=0 --cache --cache-location .eslintcache --fix src",
@@ -102,7 +98,6 @@
     "@vitejs/plugin-react": "^6.1.1",
     "@wdio/tauri-service": "1.4.0",
     "cli-color": "^2.0.4",
-    "commander": "^15.0.0",
     "cross-env": "^10.1.0",
     "eslint": "^10.11.0",
     "eslint-import-resolver-typescript": "^4.4.5",
@@ -114,10 +109,8 @@
     "eslint-plugin-sukka": "^10.2.0",
     "eslint-plugin-unused-imports": "^4.4.1",
     "globals": "^17.12.0",
-    "husky": "^9.1.7",
     "jiti": "^2.7.0",
     "knip": "6.39.0",
-    "lint-staged": "^17.5.1",
     "sass": "^1.104.1",
     "tar": "^7.5.22",
     "terser": "^5.51.2",
@@ -128,15 +121,6 @@
     "vitest": "^5.0.1",
     "webdriverio": "10.0.0",
     "ws": "8.22.0"
-  },
-  "lint-staged": {
-    "*.{ts,tsx,js,mjs}": [
-      "eslint --fix --max-warnings=0",
-      "biome format --write"
-    ],
-    "*.{css,json}": [
-      "biome format --write"
-    ]
   },
   "type": "module",
   "packageManager": "pnpm@12.11.2"

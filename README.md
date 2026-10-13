@@ -33,14 +33,15 @@ scripts/native-core-assets.sh
 scripts/native-core-build.sh build
 scripts/native-ui-build.sh
 open '.work/native-ui/Clash Native.app'
-scripts/native-ui-test.sh
-scripts/native-core-build.sh test --offline
+scripts/check-local.sh
 ```
 
 Rust 脚本优先使用 `rust-toolchain.toml` 指定的**已安装**工具链。若本机
 使用其他兼容版本，可设置 `NATIVE_RUST_BIN_DIR` 指向其 `bin` 目录。
 首次依赖下载需去掉 `--offline`，下载缓存仍保留在 `.work/cargo`。
-详细界面说明见 [native/README.md](native/README.md)。
+`check-local.sh` 使用已有缓存，检查原生 Rust 格式、Clippy、单元测试及
+Swift → Rust → mihomo 集成，不安装工具或调用 Node。详细界面说明见
+[native/README.md](native/README.md)。
 
 开发实例使用独立目录、socket 和端口。测试不接管或修改日常代理的
 系统代理、DNS、路由、TUN 或服务。发布签名与公证尚未实施；当前本地
@@ -53,6 +54,26 @@ mihomo 内核更新实现和接口继续保留，暂不自研或更换内核。�
 
 ## 维护
 
-直接在 `main` 验证并使用 `git commit -s -S` 提交。参见
-[CONTRIBUTING.md](CONTRIBUTING.md)。保留许可证与历史发行记录；与原生
-产品无关的上游模板、兼容代码和文档按引用关系逐步删除。
+只在本机开发和编译；不维护容器、交叉编译、GitHub CI 或上游应用发布
+流水线。保留许可证、来源说明和 Git 历史；旧发行记录可从 Git 历史查询。
+直接在 `main` 验证并提交，使用仓库本地的签名设置，签名失败时停止提交：
+
+```sh
+git commit -s -S -m "fix(component): describe the change"
+git verify-commit HEAD
+```
+
+React/Tauri 仍在迁移中，涉及旧壳时使用已安装的 Node/pnpm 运行相关检查：
+
+```sh
+pnpm typecheck
+pnpm test
+pnpm lint
+pnpm format:check
+pnpm arch:check
+pnpm knip:check
+pnpm gen:contract --check
+```
+
+删除旧界面后会一并删除这些工具和配置。AGENTS.md 只记录实际开发
+约束；不保留其他重复的 AI 工具说明。

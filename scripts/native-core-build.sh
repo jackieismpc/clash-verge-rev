@@ -18,4 +18,8 @@ mkdir -p "$CARGO_HOME" "$CARGO_TARGET_DIR" "$TMPDIR"
 cd "$project_root"
 operation="${1:-build}"
 if (( $# > 0 )); then shift; fi
-"$rust_bin/cargo" "$operation" -p "${NATIVE_RUST_PACKAGE:-clash-verge-native-core}" --target aarch64-apple-darwin --locked "$@"
+cargo_flags=()
+if [[ "$operation" != fmt ]]; then
+  cargo_flags+=(--target aarch64-apple-darwin --locked)
+fi
+"$rust_bin/cargo" "$operation" -p "${NATIVE_RUST_PACKAGE:-clash-verge-native-core}" "${cargo_flags[@]}" "$@"

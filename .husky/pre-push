@@ -1,4 +1,0 @@
-#!/bin/sh
-set -eu
-git diff --check
-# Native and legacy checks use installed toolchains and project-local caches.

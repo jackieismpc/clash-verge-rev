@@ -11,6 +11,14 @@ use tokio::io::AsyncWriteExt;
 
 pub const MAX_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 
+#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ExecutionMode {
+    #[default]
+    Interactive,
+    IntegrationTest,
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Options {
@@ -18,6 +26,9 @@ pub struct Options {
     pub data_dir: PathBuf,
     pub mihomo_path: Option<PathBuf>,
     pub mixed_port: Option<u16>,
+    #[serde(default)]
+    pub execution_mode: ExecutionMode,
+    pub integration_root: Option<PathBuf>,
 }
 
 impl Options {
@@ -34,7 +45,7 @@ impl Options {
         if self.mixed_port == Some(0) {
             bail!("mixedPort must be nonzero");
         }
-        Ok(())
+        crate::isolation::validate(self)
     }
 }
 
@@ -171,6 +182,15 @@ impl Store {
         });
         data
     }
+    pub fn owned_runtime_yaml(&self, socket: &Path, secret: &str, options: &Options) -> Result<String> {
+        let text = self.runtime_yaml(socket, secret)?;
+        if options.execution_mode != ExecutionMode::IntegrationTest {
+            return Ok(text);
+        }
+        let mut yaml = parse_yaml(&text)?;
+        crate::isolation::normalize(yaml.as_mapping_mut().context("invalid test config")?, options)?;
+        serde_yaml_ng::to_string(&yaml).context("serialize isolated runtime YAML")
+    }
 }
 
 pub fn parse_yaml(text: &str) -> Result<Value> {
@@ -221,6 +241,7 @@ pub async fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
+        .mode(0o600)
         .open(&temp)
         .await
         .with_context(|| format!("create staging file {}", temp.display()))?;

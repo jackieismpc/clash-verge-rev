@@ -6,7 +6,10 @@ extern "C" {
 #endif
 typedef struct CvnHandle CvnHandle;
 /* All strings are UTF-8 JSON, schema version 1. No callback crosses the ABI.
- * Config: {version:1,dataDir:absolute,mihomoPath?:absolute,mixedPort?:u16}.
+ * Config: {version:1,dataDir:absolute,mihomoPath?:absolute,mixedPort?:u16,
+ *          executionMode?:interactive|integrationTest,integrationRoot?:absolute}.
+ * Test mode requires a real .work/integration root and a private child dataDir.
+ * It disables privileged effects and confines provider files and listeners.
  * Creation and destruction perform I/O: call on a background executor.
  * Request: {version:1,id:string,command:string,args:object,
  *           coreGeneration?:u64,revision?:u64}.

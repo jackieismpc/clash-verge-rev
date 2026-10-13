@@ -40,7 +40,7 @@ private struct GeneralPreferences: View {
                         else { try SMAppService.mainApp.unregister() }
                         loginEnabled = SMAppService.mainApp.status == .enabled
                     } catch { model.report(error) }
-                })).disabled(model.isDemo)
+                })).disabled(model.isDemo || model.isIntegrationTest)
                 Text("关闭主窗口后继续后台代理，通过菜单栏重开窗口。退出应用会停止所属内核。")
                     .font(.caption).foregroundStyle(.secondary)
             }

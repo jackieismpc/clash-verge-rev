@@ -30,7 +30,7 @@ private func unusedPort() throws -> UInt16 {
     let root = try #require(environment["CVN_TEST_ROOT"])
     let directory = URL(fileURLWithPath: root).appendingPathComponent("i-" + UUID().uuidString.prefix(8))
     defer { try? FileManager.default.removeItem(at: directory) }
-    let transport = NativeCoreTransport(options: NativeCoreOptions(libraryPath: library, dataDirectory: directory.path, mihomoPath: mihomo, mixedPort: try unusedPort()))
+    let transport = NativeCoreTransport(options: NativeCoreOptions(libraryPath: library, dataDirectory: directory.path, mihomoPath: mihomo, mixedPort: try unusedPort(), executionMode: .integrationTest, integrationRoot: root))
     let providerServer = try await HTTPRuleFixture.start()
     defer { providerServer.stop() }
     do {
@@ -67,6 +67,11 @@ private func unusedPort() throws -> UInt16 {
         let started = try await transport.execute(CommandEnvelope(command: "startCore"))
         #expect(started.coreStatus == "running")
         #expect(started.generation > initial.generation)
+        for filename in ["state.json", "runtime.yaml", "core.log"] {
+            let attributes = try FileManager.default.attributesOfItem(atPath: directory.appendingPathComponent(filename).path)
+            #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+        }
+        #expect(transport.isIntegrationTest)
         let direct = try #require(started.nodes.first { $0.group == "测试 分组" && $0.name == "DIRECT" })
         #expect(started.rules.contains { $0.target == "测试 分组" })
         var providerState = started
@@ -98,7 +103,7 @@ private func unusedPort() throws -> UInt16 {
         let renamed = try await transport.execute(CommandEnvelope(command: "renameProfile", payload: ["profileID": profile.id, "name": "已保存"] ))
         #expect(renamed.profiles.first?.name == "已保存")
         await transport.shutdown()
-        let reopened = NativeCoreTransport(options: NativeCoreOptions(libraryPath: library, dataDirectory: directory.path, mihomoPath: mihomo, mixedPort: try unusedPort()))
+        let reopened = NativeCoreTransport(options: NativeCoreOptions(libraryPath: library, dataDirectory: directory.path, mihomoPath: mihomo, mixedPort: try unusedPort(), executionMode: .integrationTest, integrationRoot: root))
         #expect(try await reopened.snapshot().profiles.first?.name == "已保存")
         await reopened.shutdown()
     } catch {

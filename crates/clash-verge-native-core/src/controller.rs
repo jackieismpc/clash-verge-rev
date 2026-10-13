@@ -26,6 +26,7 @@ pub struct Controller {
     pub streams: Vec<JoinHandle<()>>,
     pub(crate) read_tasks: Vec<(Arc<Cancellation>, JoinHandle<()>)>,
     delay_slots: Arc<tokio::sync::Semaphore>,
+    pub(crate) integration_test: bool,
 }
 
 impl Controller {
@@ -43,6 +44,7 @@ impl Controller {
             streams: vec![],
             read_tasks: vec![],
             delay_slots: Arc::new(tokio::sync::Semaphore::new(8)),
+            integration_test: false,
         })
     }
 
@@ -55,6 +57,7 @@ impl Controller {
             streams: vec![],
             read_tasks: vec![],
             delay_slots: Arc::clone(&self.delay_slots),
+            integration_test: self.integration_test,
         }
     }
 
@@ -87,10 +90,10 @@ impl Controller {
         serde_json::from_str(&text).context("Mihomo returned invalid JSON")
     }
 
-    pub async fn validate(binary: &Path, config: &Path, home: &Path) -> Result<()> {
+    pub async fn validate(binary: &Path, config: &Path, home: &Path, integration_test: bool) -> Result<()> {
         let output = tokio::time::timeout(
             Duration::from_secs(20),
-            Command::new(binary)
+            owned_command(binary, home, integration_test)
                 .arg("-t")
                 .arg("-d")
                 .arg(home)
@@ -118,9 +121,14 @@ impl Controller {
         if tokio::fs::try_exists(&self.socket).await? {
             bail!("owned controller path is already occupied");
         }
-        let output = std::fs::OpenOptions::new().create(true).append(true).open(log)?;
+        use std::os::unix::fs::OpenOptionsExt;
+        let output = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(log)?;
         self.child = Some(
-            Command::new(binary)
+            owned_command(binary, home, self.integration_test)
                 .arg("-d")
                 .arg(home)
                 .arg("-f")
@@ -237,6 +245,22 @@ impl Controller {
         }
         Ok(())
     }
+}
+
+fn owned_command(binary: &Path, home: &Path, integration_test: bool) -> Command {
+    let mut command = Command::new(binary);
+    command.current_dir(home);
+    if integration_test {
+        command.env_clear().env("HOME", home).env("TMPDIR", home.join("tmp"));
+        // Only the forked child changes its mask; this closure performs one syscall.
+        unsafe {
+            command.pre_exec(|| {
+                libc::umask(0o077);
+                Ok(())
+            });
+        }
+    }
+    command
 }
 
 pub fn public_request_allowed(method: &str, path: &str) -> bool {

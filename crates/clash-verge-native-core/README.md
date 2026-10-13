@@ -50,6 +50,17 @@ The local backups here contain native state only and do not read legacy ZIPs.
 Core startup validates the configuration and waits at most 15 seconds for the
 owned Unix controller. Distribution helper/core packaging is a separate step.
 
+Initialization accepts `executionMode: "integrationTest"` with an absolute
+`integrationRoot` ending in `.work/integration` and a private child `dataDir`.
+Rust rejects foreign/symlinked paths, forces unprivileged loopback/Unix endpoints,
+disables TUN, DNS listeners, NTP and external listeners/UI, and rewrites HTTP
+provider caches. Local file providers must already live inside the owned run.
+System networking, helper and login commands are forbidden regardless of YAML
+overrides. Engine subprocesses receive an empty inherited environment and a
+child-only private file mask; the parent environment/mask stays unchanged.
+Swift test mode also disables login registration. Runtime configuration/state
+and engine logs use private permissions. Interactive mode is the default.
+
 Tests use project-local directories and loopback/Unix fixtures. They cover
 failed persistence rollback, cancellation without commit, directory ownership,
 stale generations, protocol-field preservation and C buffer/shutdown handling.

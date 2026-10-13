@@ -19,3 +19,4 @@ reqwest = { workspace = true }
 clash-verge-media-unlock = { workspace = true }
 futures-util = "0.3"
 tokio-tungstenite = "0.28"
+libc = "0.2"

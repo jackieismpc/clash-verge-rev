@@ -6,9 +6,10 @@ compile_error!("clash-verge-native-core supports Apple Silicon macOS only");
 pub mod config;
 pub mod controller;
 mod ffi;
+mod isolation;
 
 use anyhow::{Context, Result, bail};
-use config::{MAX_DOCUMENT_BYTES, Options, Profile, Store, atomic_write, now, parse_yaml};
+use config::{ExecutionMode, MAX_DOCUMENT_BYTES, Options, Profile, Store, atomic_write, now, parse_yaml};
 use controller::{Controller, percent_encode, public_request_allowed, stopped};
 use futures_util::{FutureExt, StreamExt};
 use serde::Deserialize;
@@ -200,13 +201,18 @@ impl Client {
     pub fn open(options: Options) -> Result<Self> {
         options.validate()?;
         std::fs::create_dir_all(&options.data_dir)?;
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         std::fs::set_permissions(&options.data_dir, std::fs::Permissions::from_mode(0o700))?;
+        if options.execution_mode == ExecutionMode::IntegrationTest {
+            std::fs::create_dir_all(options.data_dir.join("tmp"))?;
+            std::fs::set_permissions(options.data_dir.join("tmp"), std::fs::Permissions::from_mode(0o700))?;
+        }
         let directory_lock = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
+            .mode(0o600)
             .open(options.data_dir.join("owner.lock"))?;
         directory_lock
             .try_lock()
@@ -256,7 +262,8 @@ impl Client {
         });
         let (sender, receiver) = mpsc::channel(MAX_PENDING);
         let (complete, completion) = std::sync::mpsc::channel();
-        let controller = Controller::new(socket, secret.clone())?;
+        let mut controller = Controller::new(socket, secret.clone())?;
+        controller.integration_test = options.execution_mode == ExecutionMode::IntegrationTest;
         let mut worker = Worker {
             options,
             store,
@@ -431,6 +438,22 @@ impl Worker {
     }
 
     async fn execute(&mut self, request: &Request, cancel: &Cancellation) -> Result<Value> {
+        if self.options.execution_mode == ExecutionMode::IntegrationTest
+            && [
+                "systemProxy.",
+                "systemDns.",
+                "dns.",
+                "route.",
+                "tun.",
+                "helper.",
+                "login.",
+                "autostart.",
+            ]
+            .iter()
+            .any(|prefix| request.command.starts_with(prefix))
+        {
+            bail!("integrationTest forbids system networking, helper and login operations");
+        }
         cancel.check()?;
         if request
             .core_generation
@@ -687,12 +710,17 @@ impl Worker {
         if persisted_bytes.len() > MAX_DOCUMENT_BYTES * 4 {
             bail!("native state exceeds 64 MiB limit");
         }
-        let yaml = candidate.runtime_yaml(&self.controller.socket, &self.secret)?;
+        let yaml = candidate.owned_runtime_yaml(&self.controller.socket, &self.secret, &self.options)?;
         let staged = self.options.data_dir.join("runtime-staged.yaml");
         atomic_write(&staged, yaml.as_bytes()).await?;
         if let Some(binary) = &self.options.mihomo_path {
             cancel
-                .run(Controller::validate(binary, &staged, &self.options.data_dir))
+                .run(Controller::validate(
+                    binary,
+                    &staged,
+                    &self.options.data_dir,
+                    self.controller.integration_test,
+                ))
                 .await?;
         }
         cancel.check()?;
@@ -746,7 +774,9 @@ impl Worker {
 
     async fn restore_runtime(&mut self) -> Result<()> {
         let path = self.options.data_dir.join("runtime-rollback.yaml");
-        let yaml = self.store.runtime_yaml(&self.controller.socket, &self.secret)?;
+        let yaml = self
+            .store
+            .owned_runtime_yaml(&self.controller.socket, &self.secret, &self.options)?;
         atomic_write(&path, yaml.as_bytes()).await?;
         if let Err(error) = self
             .controller
@@ -776,12 +806,22 @@ impl Worker {
         let port = self.store.settings.mixed_port;
         let probe = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
             .context("owned mixedPort is already occupied")?;
+        let udp_probe = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, port))
+            .context("owned mixedPort UDP is already occupied")?;
         drop(probe);
+        drop(udp_probe);
         let path = self.options.data_dir.join("runtime.yaml");
-        let yaml = self.store.runtime_yaml(&self.controller.socket, &self.secret)?;
+        let yaml = self
+            .store
+            .owned_runtime_yaml(&self.controller.socket, &self.secret, &self.options)?;
         atomic_write(&path, yaml.as_bytes()).await?;
         cancel
-            .run(Controller::validate(&binary, &path, &self.options.data_dir))
+            .run(Controller::validate(
+                &binary,
+                &path,
+                &self.options.data_dir,
+                self.controller.integration_test,
+            ))
             .await?;
         cancel.check()?;
         self.runtime_state["coreGeneration"] = self.generation().checked_add(1).context("generation exhausted")?.into();

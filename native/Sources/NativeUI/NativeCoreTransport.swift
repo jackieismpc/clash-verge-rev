@@ -46,10 +46,13 @@ private struct NativeEnvelope: Decodable, Sendable {
 }
 
 struct NativeCoreOptions: Sendable {
+    enum ExecutionMode: String, Sendable { case interactive, integrationTest }
     var libraryPath: String
     var dataDirectory: String
     var mihomoPath: String?
     var mixedPort: UInt16 = 17890
+    var executionMode: ExecutionMode = .interactive
+    var integrationRoot: String? = nil
 
     static func application() -> Self {
         let environment = ProcessInfo.processInfo.environment
@@ -104,7 +107,8 @@ private final class NativeLibrary {
             self.nextEvent = try symbol("cvn_next_event", Read.self)
             self.stop = try symbol("cvn_stop", Destroy.self)
             self.destroy = try symbol("cvn_destroy", Destroy.self)
-            var config: [String: WireValue] = ["version": .number(1), "dataDir": .string(options.dataDirectory), "mixedPort": .number(Double(options.mixedPort))]
+            var config: [String: WireValue] = ["version": .number(1), "dataDir": .string(options.dataDirectory), "mixedPort": .number(Double(options.mixedPort)), "executionMode": .string(options.executionMode.rawValue)]
+            if let root = options.integrationRoot { config["integrationRoot"] = .string(root) }
             if let path = options.mihomoPath { config["mihomoPath"] = .string(path) }
             let bytes = try JSONEncoder().encode(WireValue.object(config))
             let text = String(decoding: bytes, as: UTF8.self)
@@ -131,6 +135,7 @@ private final class NativeLibrary {
 
 actor NativeCoreTransport: CoreTransport {
     nonisolated let isDemo = false
+    nonisolated let isIntegrationTest: Bool
     private let options: NativeCoreOptions
     private var library: NativeLibrary?
     private var stopped = false
@@ -155,7 +160,10 @@ actor NativeCoreTransport: CoreTransport {
     private var failure: ClientFailure?
     private var lastProjection = Date.distantPast
 
-    init(options: NativeCoreOptions) { self.options = options }
+    init(options: NativeCoreOptions) {
+        self.options = options
+        self.isIntegrationTest = options.executionMode == .integrationTest
+    }
 
     private func open() throws -> NativeLibrary {
         guard !stopped else { throw CancellationError() }

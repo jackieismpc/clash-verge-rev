@@ -1215,6 +1215,7 @@ dependencies = [
  "anyhow",
  "clash-verge-media-unlock",
  "futures-util",
+ "libc",
  "reqwest 0.13.5",
  "serde",
  "serde_json",

@@ -147,12 +147,14 @@ struct CommandEnvelope: Codable, Sendable {
 
 protocol CoreTransport: Sendable {
     var isDemo: Bool { get }
+    var isIntegrationTest: Bool { get }
     func snapshot() async throws -> CoreSnapshot
     func execute(_ command: CommandEnvelope) async throws -> CoreSnapshot
     func shutdown() async
 }
 
 extension CoreTransport {
+    var isIntegrationTest: Bool { false }
     func shutdown() async {}
 }
 

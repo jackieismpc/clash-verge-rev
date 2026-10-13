@@ -10,7 +10,8 @@ export SWIFT_MODULECACHE_PATH="$task_work/cache/swift"
 "$project_root/scripts/native-core-assets.sh" --offline
 export CVN_LIBRARY_PATH="$project_root/.work/target/aarch64-apple-darwin/debug/libclash_verge_native_core.dylib"
 export CVN_MIHOMO_PATH="$project_root/.work/engines/mihomo"
-export CVN_TEST_ROOT="$project_root/.work"
+export CVN_TEST_ROOT="$project_root/.work/integration"
+mkdir -p "$CVN_TEST_ROOT"
 developer_path="${DEVELOPER_DIR:-$(/usr/bin/xcode-select -p)}"
 if [[ -d "$developer_path/Platforms/MacOSX.platform/Developer/Library/Frameworks" ]]; then
   testing_frameworks="$developer_path/Platforms/MacOSX.platform/Developer/Library/Frameworks"

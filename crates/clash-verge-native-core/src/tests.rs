@@ -26,7 +26,26 @@ impl TestDir {
             data_dir: self.0.clone(),
             mihomo_path: None,
             mixed_port: Some(19882),
+            execution_mode: ExecutionMode::Interactive,
+            integration_root: None,
         }
+    }
+    fn integration() -> Self {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(".work/integration");
+        let path = root.join(unique_id());
+        std::fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+    fn integration_options(&self) -> Options {
+        let mut options = self.options();
+        options.execution_mode = ExecutionMode::IntegrationTest;
+        options.integration_root = Some(self.0.parent().unwrap().to_path_buf());
+        options
     }
 }
 impl Drop for TestDir {
@@ -44,6 +63,113 @@ fn request(id: &str, command: &str, args: Value) -> Request {
         core_generation: None,
         revision: None,
     }
+}
+
+#[test]
+fn integration_mode_rejects_foreign_directories_and_links() {
+    let dir = TestDir::integration();
+    let mut options = dir.integration_options();
+    options.validate().unwrap();
+    options.integration_root = None;
+    assert!(options.validate().is_err());
+    options = dir.integration_options();
+    let outside = TestDir::new();
+    options.data_dir = outside.0.clone();
+    assert!(options.validate().is_err());
+    options = dir.integration_options();
+    std::os::unix::fs::symlink(&outside.0, dir.0.join("providers")).unwrap();
+    assert!(options.validate().is_err());
+}
+
+#[test]
+fn test_profile_cannot_reenable_system_effects_or_escape_provider_cache() {
+    let dir = TestDir::integration();
+    let client = Client::open(dir.integration_options()).unwrap();
+    for command in [
+        "systemProxy.set",
+        "systemDns.set",
+        "tun.set",
+        "helper.install",
+        "login.set",
+    ] {
+        assert_eq!(client.submit(request(command, command, json!({}))), 0);
+        let event = result(&client, command);
+        assert_eq!(event["ok"], false);
+        assert!(
+            event["error"]["message"]
+                .as_str()
+                .unwrap_or_else(|| panic!("unexpected fixture envelope: {event}"))
+                .contains("integrationTest forbids")
+        );
+    }
+    assert_eq!(client.submit(request("bad", "profile.import", json!({"yaml":"rule-providers: {bad: {type: http, path: ../foreign.yaml, url: https://example.invalid/rules}}\n"}))), 0);
+    assert_eq!(result(&client, "bad")["ok"], false);
+    assert!(client.snapshot()["data"]["profiles"].as_array().unwrap().is_empty());
+    import(&client);
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        std::fs::metadata(dir.0.join("state.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    assert_eq!(std::fs::metadata(&dir.0).unwrap().permissions().mode() & 0o777, 0o700);
+}
+
+#[test]
+fn isolated_runtime_preserves_protocol_fields_and_owns_all_endpoints() {
+    let dir = TestDir::integration();
+    let mut store = Store::new(19992);
+    store.profiles.push(Profile {
+        id: "p".into(), name: "fixture".into(), kind: "local".into(), url: None, updated_at: 0,
+        subscription_info: None, update_interval_minutes: None, home: None, selected_nodes: BTreeMap::new(),
+        yaml: "proxies: [{name: node, type: vless, unknown-future-field: keep}]\ntun: {enable: true, auto-route: true}\nntp: {enable: true, write-to-system: true}\ndns: {enable: true, listen: 0.0.0.0:53}\nlisteners: [{type: tun}]\nexternal-ui: /foreign/ui\nrule-providers: {remote: {type: http, path: cache/shared.yaml, url: https://example.invalid/rules}}\n".into(),
+    });
+    store.selected_profile_id = Some("p".into());
+    store.overrides =
+        "allow-lan: true\nmixed-port: 7897\nexternal-controller: 0.0.0.0:9090\ntun: {enable: true}\n".into();
+    let text = store
+        .owned_runtime_yaml(&dir.0.join("c.sock"), "owned", &dir.integration_options())
+        .unwrap();
+    let yaml = parse_yaml(&text).unwrap();
+    assert_eq!(yaml["mixed-port"].as_u64(), Some(19992));
+    assert_eq!(yaml["allow-lan"].as_bool(), Some(false));
+    assert_eq!(yaml["tun"]["enable"].as_bool(), Some(false));
+    assert_eq!(yaml["ntp"]["write-to-system"].as_bool(), Some(false));
+    assert!(yaml["dns"].as_mapping().unwrap().get("listen").is_none());
+    assert!(yaml.as_mapping().unwrap().get("external-ui").is_none());
+    assert!(yaml.as_mapping().unwrap().get("listeners").is_none());
+    assert_eq!(yaml["proxies"][0]["unknown-future-field"].as_str(), Some("keep"));
+    assert_eq!(
+        yaml["rule-providers"]["remote"]["path"].as_str(),
+        Some("providers/rule-providers/p0.yaml")
+    );
+}
+
+#[test]
+fn occupied_udp_port_is_rejected_without_starting_or_stopping_a_process() {
+    let dir = TestDir::integration();
+    let tcp = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = tcp.local_addr().unwrap().port();
+    let udp = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
+    drop(tcp);
+    let mut options = dir.integration_options();
+    options.mixed_port = Some(port);
+    options.mihomo_path = Some(PathBuf::from("/usr/bin/false"));
+    let client = Client::open(options).unwrap();
+    assert_eq!(client.submit(request("start", "runtime.start", json!({}))), 0);
+    let event = result(&client, "start");
+    assert_eq!(event["ok"], false);
+    assert!(
+        event["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("UDP is already occupied")
+    );
+    assert_eq!(client.snapshot()["data"]["runtime"]["status"], "stopped");
+    assert_eq!(udp.local_addr().unwrap().port(), port);
 }
 fn result(client: &Client, id: &str) -> Value {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);

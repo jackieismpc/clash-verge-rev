@@ -96,11 +96,18 @@ Swift 拥有展示和编辑草稿；业务缺口用能力状态表达，不伪�
 只读源通过本地参数传入，不将内容写入受 Git 跟踪文件。
 用户授权源：本机 Clash Verge profiles 下的 `Rh6ktlC2sPvF.yaml`。
 
-- [ ] M5.1：初始化支持 `executionMode: interactive | integrationTest`。
+- [x] M5.1：初始化支持 `executionMode: interactive | integrationTest`。
   Rust 强制隔离：独立 `.work/integration/<编号>`，0700 目录、0600 文件、
   Unix socket、随机 secret、loopback 端口；关闭 TUN、DNS 监听、NTP、
   LAN、额外监听和外部 UI；provider 路径重写，不允许越界。
   禁止系统代理/DNS/路由、helper 和登录启动操作，覆写不能绕过。
+  额外参数 `integrationRoot` 必须指向真实 `.work/integration`，运行目录
+  必须在其下。提前落实隔离前提，为后续真实测试提供边界；不进行性能
+  重构。Go 子进程清空继承环境并设置私有文件掩码，父进程环境不变。
+  验证：13 项核心 Rust、2 项工具、8 项 Swift 测试；覆盖路径逃逸/
+  symlink、覆写再启用网络、禁止命令、UDP 端口冲突和 0600/0700 权限。
+  Swift 真实 mihomo 桥接已使用该模式；机场测试仍未运行。
+  提交主题：`feat(test): enforce private native integration runtime policy`。
 - [ ] M5.2：确定性测试覆盖路径/端口、配置回滚、取消/过期结果、快速
   切换、流断线、备份损坏、退出清理与重新启动。
 - [ ] M5.3：真实测试入口。默认 VLESS/SS/Hysteria2/TUIC 每类最多两节点，

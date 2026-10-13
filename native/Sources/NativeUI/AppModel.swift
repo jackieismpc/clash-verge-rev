@@ -50,6 +50,7 @@ enum ClientPage: String, CaseIterable, Identifiable {
     var inspectedNodeID: String?
     private let transport: any CoreTransport
     var isDemo: Bool { transport.isDemo }
+    var isIntegrationTest: Bool { transport.isIntegrationTest }
     var selectedNode: NodeRecord? { snapshot?.nodes.first { $0.id == snapshot?.selectedNodeID } }
     var inspectedNode: NodeRecord? { snapshot?.nodes.first { $0.id == inspectedNodeID } }
 

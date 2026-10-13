@@ -32,6 +32,14 @@ enum ClientPage: String, CaseIterable, Identifiable {
     var loading = true
     private var operations = 0
     var testingNodes = false
+    private var testingRequestID: String?
+    private var testingNames: Set<String> = []
+    var testCompleted: Int {
+        Set((snapshot?.nodes ?? []).filter {
+            testingNames.contains($0.name) && $0.testRequestID == testingRequestID
+        }.map(\.name)).count
+    }
+    var testTotal: Int { testingNames.count }
     @ObservationIgnored private var nodeTestTask: Task<Void, Never>?
     @ObservationIgnored private var refreshing = false
     var busy: Bool { operations > 0 }
@@ -45,7 +53,12 @@ enum ClientPage: String, CaseIterable, Identifiable {
     var selectedNode: NodeRecord? { snapshot?.nodes.first { $0.id == snapshot?.selectedNodeID } }
     var inspectedNode: NodeRecord? { snapshot?.nodes.first { $0.id == inspectedNodeID } }
 
-    init(transport: any CoreTransport) { self.transport = transport }
+    init(transport: any CoreTransport) {
+        self.transport = transport
+        if transport.isDemo, let value = CommandLine.arguments.first(where: { $0.hasPrefix("--page=") }) {
+            page = ClientPage(rawValue: String(value.dropFirst("--page=".count))) ?? .overview
+        }
+    }
 
     func poll() async {
         await refresh()
@@ -67,13 +80,13 @@ enum ClientPage: String, CaseIterable, Identifiable {
         loading = false
     }
 
-    func command(_ name: String, payload: [String: String] = [:]) async {
+    func command(_ name: String, payload: [String: String] = [:], requestID: String = UUID().uuidString) async {
         operations += 1
         let testing = name == "testAllNodes" || name == "testNode"
         if testing { testingNodes = true }
         defer { operations -= 1; if testing { testingNodes = false } }
         do {
-            let result = try await transport.execute(CommandEnvelope(expectedGeneration: snapshot?.generation, command: name, payload: payload))
+            let result = try await transport.execute(CommandEnvelope(requestID: requestID, expectedGeneration: snapshot?.generation, command: name, payload: payload))
             failure = nil
             accept(result)
         } catch {
@@ -89,8 +102,12 @@ enum ClientPage: String, CaseIterable, Identifiable {
 
     func testNodes(nodeID: String? = nil) {
         guard !testingNodes else { return }
+        testingNodes = true
+        let requestID = UUID().uuidString
+        testingRequestID = requestID
+        testingNames = Set((snapshot?.nodes ?? []).filter { nodeID == nil || $0.id == nodeID }.map(\.name))
         nodeTestTask = Task {
-            await command(nodeID == nil ? "testAllNodes" : "testNode", payload: nodeID.map { ["nodeID": $0] } ?? [:])
+            await command(nodeID == nil ? "testAllNodes" : "testNode", payload: nodeID.map { ["nodeID": $0] } ?? [:], requestID: requestID)
             nodeTestTask = nil
         }
     }

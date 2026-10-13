@@ -81,7 +81,7 @@ private struct NetworkPreferences: View {
     }
 }
 
-private struct OverridesEditor: View {
+struct OverridesEditor: View {
     @Bindable var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @ViewState private var yaml = ""

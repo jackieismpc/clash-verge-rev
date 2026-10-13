@@ -146,6 +146,7 @@ actor NativeCoreTransport: CoreTransport {
     private var nodes: [NodeRecord] = []
     private var selectedNodeID: String?
     private var rules: [RuleRecord] = []
+    private var providers: [ProviderRecord] = []
     private var connections: [ConnectionRecord] = []
     private var logs: [LogRecord] = []
     private var traffic: [TrafficSample] = []
@@ -237,6 +238,12 @@ actor NativeCoreTransport: CoreTransport {
         case "listBackups": try await loadBackups()
         case "restoreBackup": _ = try await request("backup.restore", args: ["id": .string(payload["backupID"] ?? "")], id: command.requestID)
         case "setOverrides": _ = try await request("overrides.set", args: ["yaml": .string(payload["yaml"] ?? "{}")], id: command.requestID)
+        case "updateProvider":
+            guard let provider = providers.first(where: { $0.id == payload["providerID"] }), provider.vehicle.lowercased() != "file" else {
+                throw invalid("该规则源或节点源无法远程更新")
+            }
+            _ = try await coreRequest("PUT", "/providers/\(provider.category)/\(escaped(provider.name))", id: command.requestID)
+            projectionRevision = nil
         default: throw invalid("此操作尚未实现：\(command.command)")
         }
         failure = nil
@@ -309,7 +316,7 @@ actor NativeCoreTransport: CoreTransport {
     private func acceptState(_ event: NativeEnvelope, data: WireValue) {
         guard event.coreGeneration > generation || (event.coreGeneration == generation && event.revision >= revision) else { return }
         if generation != event.coreGeneration {
-            nodes.removeAll(); rules.removeAll(); connections.removeAll(); traffic.removeAll()
+            nodes.removeAll(); rules.removeAll(); providers.removeAll(); connections.removeAll(); traffic.removeAll()
             selectedNodeID = nil; subscribedGeneration = nil; projectionGeneration = nil
         }
         generation = event.coreGeneration; revision = event.revision; state = data
@@ -338,6 +345,8 @@ actor NativeCoreTransport: CoreTransport {
         let expectedRevision = revision
         let proxies = try await coreRequest("GET", "/proxies")
         let ruleData = try await coreRequest("GET", "/rules")
+        let ruleProviders = try await coreRequest("GET", "/providers/rules")
+        let proxyProviders = try await coreRequest("GET", "/providers/proxies")
         guard generation == expectedGeneration, revision == expectedRevision else { return }
         var next: [NodeRecord] = []
         var chosen: String?
@@ -357,11 +366,20 @@ actor NativeCoreTransport: CoreTransport {
             if let prior = nodes.first(where: { $0.id == next[index].id }) {
                 next[index].testedAt = prior.testedAt
                 next[index].testURL = prior.testURL
+                next[index].testRequestID = prior.testRequestID
             }
         }
         nodes = next; selectedNodeID = chosen
         rules = ruleData["rules"].items.enumerated().map { index, value in
             RuleRecord(id: String(index), kind: value["type"].text ?? "", value: value["payload"].text ?? "", target: value["proxy"].text ?? "")
+        }
+        providers = [("rules", ruleProviders), ("proxies", proxyProviders)].flatMap { category, response in
+            response["providers"].fields.sorted(by: { $0.key < $1.key }).map { name, value in
+                ProviderRecord(name: name, category: category, vehicle: value["vehicleType"].text ?? "Unknown",
+                               behavior: value["behavior"].text ?? value["type"].text ?? "",
+                               count: Int(value["ruleCount"].number ?? Double(value["proxies"].items.count)),
+                               updatedAt: value["updatedAt"].text)
+            }
         }
         projectionGeneration = generation; projectionRevision = revision; lastProjection = Date()
     }
@@ -374,6 +392,7 @@ actor NativeCoreTransport: CoreTransport {
             nodes[index].available = value["error"].text == nil
             nodes[index].testedAt = value["testedAt"].number
             nodes[index].testURL = value["url"].text
+            nodes[index].testRequestID = value["requestId"].text
         }
     }
     private func applyUnlock(_ value: WireValue) {
@@ -395,6 +414,7 @@ actor NativeCoreTransport: CoreTransport {
         }
         var result = CoreSnapshot(generation: generation, sequence: sequence, mode: state["settings"]["mode"].text ?? "rule", coreStatus: state["runtime"]["status"].text ?? "stopped", selectedNodeID: selectedNodeID, nodes: nodes, profiles: profiles, rules: rules, connections: connections, logs: logs, traffic: traffic, error: failure)
         result.unlock = unlock; result.backups = backups; result.overrides = state["overrides"].text ?? "{}"
+        result.providers = providers
         result.profileDocuments = Dictionary(uniqueKeysWithValues: state["profiles"].items.compactMap { value in
             guard let id = value["id"].text, let yaml = value["yaml"].text else { return nil }; return (id, yaml)
         })
@@ -408,7 +428,7 @@ actor NativeCoreTransport: CoreTransport {
         guard let id = value["id"].text else { return nil }
         let metadata = value["metadata"]
         let host = metadata["host"].text ?? metadata["destinationIP"].text ?? ""
-        return ConnectionRecord(id: id, host: host, destination: "\(metadata["destinationIP"].text ?? ""):\(Int(metadata["destinationPort"].number ?? 0))", rule: value["rule"].text ?? "", node: value["chains"].items.compactMap(\.text).joined(separator: " → "), uploadBytes: UInt64(value["upload"].number ?? 0), downloadBytes: UInt64(value["download"].number ?? 0))
+        return ConnectionRecord(id: id, host: host, destination: "\(metadata["destinationIP"].text ?? ""):\(metadata["destinationPort"].text ?? String(Int(metadata["destinationPort"].number ?? 0)))", rule: value["rule"].text ?? "", node: value["chains"].items.compactMap(\.text).joined(separator: " → "), uploadBytes: UInt64(value["upload"].number ?? 0), downloadBytes: UInt64(value["download"].number ?? 0), source: "\(metadata["sourceIP"].text ?? ""):\(metadata["sourcePort"].text ?? "")", network: metadata["network"].text, process: metadata["processPath"].text ?? metadata["process"].text, startedAt: value["start"].text, rulePayload: value["rulePayload"].text)
     }
     private func escaped(_ text: String) -> String {
         text.addingPercentEncoding(withAllowedCharacters: CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")) ?? ""

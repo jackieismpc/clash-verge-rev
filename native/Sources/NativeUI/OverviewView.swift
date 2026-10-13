@@ -67,8 +67,8 @@ struct OverviewView: View {
                 HStack {
                     cardLabel("节点延迟", symbol: "timer")
                     Spacer()
-                    Button("测速") { if let id = model.selectedNode?.id { model.testNodes(nodeID: id) } }
-                        .disabled(model.isDemo || model.busy || model.selectedNode == nil)
+                    Button(model.isDemo ? "演示测速" : "测速") { if let id = model.selectedNode?.id { model.testNodes(nodeID: id) } }
+                        .disabled(model.busy || model.selectedNode == nil)
                 }
                 number(model.selectedNode?.latencyMS.map(String.init) ?? "尚未测试", unit: model.selectedNode?.latencyMS == nil ? "" : "ms")
                 Spacer(minLength: 12)

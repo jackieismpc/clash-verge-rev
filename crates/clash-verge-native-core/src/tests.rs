@@ -332,6 +332,13 @@ async fn delay_batch_runs_concurrently_and_publishes_each_result() {
     .unwrap();
     assert_eq!(results.as_array().unwrap().len(), 6);
     assert!(results.as_array().unwrap().iter().all(|value| value["delay"] == 42));
+    assert!(
+        results
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|value| value["requestId"] == "delay")
+    );
     assert_eq!(lock(&shared.events).len(), 6);
     assert!(
         lock(&shared.events)

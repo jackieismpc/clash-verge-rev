@@ -6,6 +6,7 @@ struct NodesView: View {
     @ViewState private var selection: Set<String> = []
     @ViewState private var sortOrder = [KeyPathComparator(\NodeRecord.name)]
     @ViewState private var frozenOrder: [String] = []
+    @ViewState private var showProviders = false
     private var nodes: [NodeRecord] {
         let records = (model.snapshot?.nodes ?? []).filter {
             model.query.isEmpty || "\($0.name) \($0.kind) \($0.group)".localizedCaseInsensitiveContains(model.query)
@@ -21,11 +22,18 @@ struct NodesView: View {
             HStack {
                 pageHeader("节点", subtitle: "单击查看详情，双击或按回车使用节点。")
                 Spacer()
+                Button("节点源…") { showProviders = true }
                 if model.testingNodes {
                     Button("取消测速") { model.cancelNodeTests() }
                 }
-                Button(model.testingNodes ? "测速中…" : "全部测速") { model.testNodes() }
-                    .disabled(model.isDemo || model.busy || model.snapshot?.coreStatus != "running")
+                Button(model.testingNodes ? "测速中…" : model.isDemo ? "演示测速" : "全部测速") { model.testNodes() }
+                    .disabled(model.busy || (!model.isDemo && model.snapshot?.coreStatus != "running"))
+            }
+            if model.testingNodes {
+                HStack {
+                    ProgressView(value: Double(model.testCompleted), total: Double(max(1, model.testTotal)))
+                    Text("\(model.testCompleted) / \(model.testTotal)").monospacedDigit().font(.caption)
+                }.accessibilityLabel("已检测 \(model.testCompleted) 个，共 \(model.testTotal) 个节点")
             }
             if nodes.isEmpty {
                 emptyState("暂无匹配节点", "尝试其他搜索词，或导入包含节点的配置。", symbol: "point.3.connected.trianglepath.dotted")
@@ -35,9 +43,10 @@ struct NodesView: View {
                         HStack(spacing: 8) {
                             Image(systemName: model.snapshot?.selectedNodeID == node.id ? "checkmark.circle.fill" : "circle")
                                 .foregroundStyle(model.snapshot?.selectedNodeID == node.id ? Color.accentColor : Color.secondary)
-                            Text(node.name).lineLimit(1).help(node.name)
+                            Text(node.name).lineLimit(1).truncationMode(.middle).help(node.name)
+                                .padding(.vertical, 4)
                         }
-                    }.width(min: 240, ideal: 340)
+                    }.width(min: 180, ideal: 340, max: 520)
                     TableColumn("类型", value: \.kind).width(min: 80, ideal: 100)
                     TableColumn("分组", value: \.group).width(min: 100, ideal: 130)
                     TableColumn("延迟", value: \.latencySort) { node in
@@ -50,7 +59,7 @@ struct NodesView: View {
                     Button("使用节点") { use(ids) }.disabled(ids.count != 1 || model.busy)
                     Button("查看详情") { model.inspectedNodeID = ids.first }.disabled(ids.count != 1)
                     Button("测速") { if let id = ids.first { model.testNodes(nodeID: id) } }
-                        .disabled(ids.count != 1 || model.isDemo || model.busy)
+                        .disabled(ids.count != 1 || model.busy)
                 } primaryAction: { ids in use(ids) }
                 .onChange(of: selection) { _, ids in model.inspectedNodeID = ids.first }
                 .onKeyPress(.return) { use(selection); return .handled }
@@ -74,6 +83,9 @@ struct NodesView: View {
                 }
             }
         }.padding(24)
+            .sheet(isPresented: $showProviders) {
+                ProviderSheet(model: model, category: "proxies")
+            }
             .onChange(of: model.testingNodes) { _, testing in
                 if testing { frozenOrder = (model.snapshot?.nodes ?? []).sorted(using: sortOrder).map(\.id) }
             }
@@ -154,13 +166,24 @@ struct ProfilesView: View {
 
 struct RulesView: View {
     @Bindable var model: AppModel
+    @ViewState private var segment = "rules"
+    @ViewState private var showOverrides = false
     private var rules: [RuleRecord] {
         (model.snapshot?.rules ?? []).filter { model.query.isEmpty || "\($0.kind) \($0.value) \($0.target)".localizedCaseInsensitiveContains(model.query) }
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            pageHeader("规则", subtitle: "按内核返回顺序显示；较早匹配的规则优先生效。")
-            if rules.isEmpty { emptyState("暂无匹配规则", "规则由当前配置和覆写内容生成。", symbol: "list.bullet.rectangle") }
+            HStack {
+                pageHeader("规则", subtitle: "按实际生效顺序展示，覆写独立保存。")
+                Spacer()
+                Button("本地覆写…") { showOverrides = true }
+            }
+            Picker("规则内容", selection: $segment) {
+                Text("生效规则").tag("rules")
+                Text("规则源").tag("providers")
+            }.pickerStyle(.segmented).frame(width: 240)
+            if segment == "providers" { ProviderListView(model: model, category: "rules") }
+            else if rules.isEmpty { emptyState("暂无匹配规则", "规则由当前配置和覆写内容生成。", symbol: "list.bullet.rectangle") }
             else {
                 Table(rules) {
                     TableColumn("类型", value: \.kind).width(min: 140, ideal: 180)
@@ -168,7 +191,8 @@ struct RulesView: View {
                     TableColumn("目标", value: \.target).width(min: 120, ideal: 160)
                 }
             }
-        }.padding(24)
+        }.padding(24).sheet(isPresented: $showOverrides) { OverridesEditor(model: model) }
+            .onAppear { if model.isDemo && CommandLine.arguments.contains("--rules=providers") { segment = "providers" } }
     }
 }
 
@@ -176,11 +200,15 @@ struct ActivityView: View {
     @Bindable var model: AppModel
     @ViewState private var segment = "connections"
     @ViewState private var selectedConnections: Set<String> = []
+    @ViewState private var detail: ConnectionRecord?
+    @ViewState private var logLevel = "all"
+    @ViewState private var paused = false
+    @ViewState private var heldLogs: [LogRecord] = []
     private var connections: [ConnectionRecord] {
         (model.snapshot?.connections ?? []).filter { model.query.isEmpty || "\($0.host) \($0.rule) \($0.node)".localizedCaseInsensitiveContains(model.query) }
     }
     private var logs: [LogRecord] {
-        (model.snapshot?.logs ?? []).filter { model.query.isEmpty || $0.message.localizedCaseInsensitiveContains(model.query) }
+        LogPresentation.filter(paused ? heldLogs : model.snapshot?.logs ?? [], level: logLevel, query: model.query)
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -202,25 +230,48 @@ struct ActivityView: View {
                         TableColumn("下载") { item in Text(ByteCountFormatter.string(fromByteCount: Int64(clamping: item.downloadBytes), countStyle: .binary)) }.width(90)
                     }
                     .contextMenu(forSelectionType: String.self) { ids in
+                        Button("查看详情") { detail = connections.first { ids.contains($0.id) } }.disabled(ids.count != 1)
                         Button("关闭连接") {
                             if let id = ids.first { Task { await model.command("closeConnection", payload: ["connectionID": id]) } }
                         }.disabled(ids.count != 1 || model.busy)
-                    }
+                    } primaryAction: { ids in detail = connections.first { ids.contains($0.id) } }
+                    .onKeyPress(.return) { detail = connections.first { selectedConnections.contains($0.id) }; return .handled }
                 }
             } else {
-                HStack { Text("\(logs.count) 条日志").font(.system(size: 12)).foregroundStyle(.secondary); Spacer(); Button("清空当前日志") { Task { await model.command("clearLogs") } } }
+                HStack {
+                    Picker("日志级别", selection: $logLevel) {
+                        Text("全部级别").tag("all")
+                        Text("调试").tag("debug")
+                        Text("信息").tag("info")
+                        Text("警告").tag("warning")
+                        Text("错误").tag("error")
+                    }.frame(width: 160)
+                    Text("\(logs.count) 条\(paused ? " · 已暂停显示" : "")").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button(paused ? "继续显示" : "暂停显示", systemImage: paused ? "play" : "pause") {
+                        if !paused { heldLogs = model.snapshot?.logs ?? [] }
+                        paused.toggle()
+                        if !paused { heldLogs.removeAll() }
+                    }
+                    Button("清空当前日志") { heldLogs.removeAll(); Task { await model.command("clearLogs") } }
+                }
                 if logs.isEmpty { emptyState("暂无日志", "新的内核事件会显示在这里。", symbol: "text.alignleft") }
                 else {
                     List(logs) { log in
                         HStack(alignment: .top, spacing: 16) {
                             Text(Date(timeIntervalSince1970: log.timestamp), style: .time).monospacedDigit().foregroundStyle(.secondary).frame(width: 85, alignment: .leading)
-                            Text(log.level.uppercased()).foregroundStyle(log.level == "error" ? Color.red : Color.secondary).frame(width: 55, alignment: .leading)
+                            Text(log.level.uppercased()).foregroundStyle(log.level == "error" ? Color.red : Color.secondary)
+                                .lineLimit(1).frame(width: 72, alignment: .leading)
                             Text(log.message).textSelection(.enabled)
                         }.font(.system(size: 12)).padding(.vertical, 5)
                     }
                 }
             }
-        }.padding(24)
+        }.padding(24).sheet(item: $detail) { ConnectionDetailView(model: model, connection: $0) }
+            .onAppear {
+                if model.isDemo && CommandLine.arguments.contains("--activity=logs") { segment = "logs" }
+                if model.isDemo && CommandLine.arguments.contains("--connection-detail") { detail = model.snapshot?.connections.first }
+            }
     }
 }
 

@@ -1,11 +1,17 @@
 import Foundation
 
+enum DemoScenario: String, Sendable, CaseIterable {
+    case normal, empty, error, loading, largeList, networkApplying, networkFailed, networkOn
+}
+
 actor DemoTransport: CoreTransport {
     nonisolated let isDemo = true
     private var state: CoreSnapshot
     private var tick = 0
+    private let scenario: DemoScenario
 
-    init() {
+    init(scenario: DemoScenario = .normal) {
+        self.scenario = scenario
         let now = Date().timeIntervalSince1970
         let history = (0..<300).map { index in
             Self.sample(timestamp: now - Double(299 - index), tick: index)
@@ -33,9 +39,36 @@ actor DemoTransport: CoreTransport {
             logs: [LogRecord(id: "l1", timestamp: now, level: "info", message: "已载入演示样本。此窗口不会启动代理内核或修改系统网络。")],
             traffic: history, error: nil
         )
+        state.providers = [
+            ProviderRecord(name: "通用域名规则 · 演示", category: "rules", vehicle: "HTTP", behavior: "domain", count: 240, updatedAt: Date().formatted()),
+            ProviderRecord(name: "本地覆盖 · 演示", category: "rules", vehicle: "File", behavior: "classical", count: 3, updatedAt: nil),
+            ProviderRecord(name: "订阅节点源 · 演示", category: "proxies", vehicle: "HTTP", behavior: "Proxy", count: 5, updatedAt: Date().formatted()),
+        ]
+        state.networkFeatures = NetworkFeatures(systemProxy: .off, tun: .unavailable)
+        state.logs += [
+            LogRecord(id: "l2", timestamp: now, level: "warning", message: "演示警告：规则源暂时不可达，保留已有规则。"),
+            LogRecord(id: "l3", timestamp: now, level: "error", message: "演示错误：节点请求超时，可在节点页重试。"),
+        ]
+        switch scenario {
+        case .empty:
+            state.nodes = []; state.profiles = []; state.rules = []; state.providers = []
+            state.connections = []; state.logs = []; state.traffic = []; state.selectedNodeID = nil
+        case .error:
+            state.coreStatus = "failed"
+            state.error = ClientFailure(code: "demo_failure", message: "演示：配置未能启动", detail: "匿名样本中的启动失败。原配置保持不变，可重新读取状态。", retryable: true)
+        case .largeList:
+            state.nodes = (0..<2000).map { index in
+                NodeRecord(id: "sample-\(index)", name: "匿名节点 \(index) · 长中文名称用于检查窗口缩放和表格截断", kind: "VLESS", group: "演示大列表", latencyMS: index % 250 + 1, available: true)
+            }
+        case .networkApplying: state.networkFeatures = NetworkFeatures(systemProxy: .applying, tun: .applying)
+        case .networkFailed: state.networkFeatures = NetworkFeatures(systemProxy: .failed, tun: .failed)
+        case .networkOn: state.networkFeatures = NetworkFeatures(systemProxy: .on, tun: .on)
+        default: break
+        }
     }
 
     func snapshot() async throws -> CoreSnapshot {
+        if scenario == .loading && tick == 0 { tick += 1; try await Task.sleep(for: .seconds(3)) }
         tick += 1
         state.sequence += 1
         state.traffic.append(Self.sample(timestamp: Date().timeIntervalSince1970, tick: tick + 300))
@@ -67,6 +100,24 @@ actor DemoTransport: CoreTransport {
         case "setMode": state.mode = command.payload["mode"] ?? "rule"
         case "closeConnection": state.connections.removeAll { $0.id == command.payload["connectionID"] }
         case "clearLogs": state.logs = []
+        case "testNode", "testAllNodes":
+            let indices = state.nodes.indices.filter { command.command == "testAllNodes" || state.nodes[$0].id == command.payload["nodeID"] }
+            for index in indices {
+                try Task.checkCancellation()
+                try await Task.sleep(for: .milliseconds(200))
+                state.nodes[index].testedAt = Date().timeIntervalSince1970
+                state.nodes[index].testURL = "演示地址 · 无网络请求"
+                state.nodes[index].testRequestID = command.requestID
+                state.sequence += 1
+            }
+        case "updateProvider":
+            if let index = state.providers.firstIndex(where: { $0.id == command.payload["providerID"] }) {
+                state.providers[index].updatedAt = Date().formatted()
+            }
+        case "setOverrides": state.overrides = command.payload["yaml"] ?? "{}"
+        case "toggleSystemProxyDemo":
+            state.networkFeatures.systemProxy = state.networkFeatures.systemProxy == .on ? .off : .on
+        case "toggleTunDemo": state.networkFeatures.tun = state.networkFeatures.tun == .on ? .off : .on
         default:
             throw ClientFailure(code: "demo_only", message: "演示模式不执行此操作", detail: "The fixture transport has no operating-system or core side effects.", retryable: false)
         }

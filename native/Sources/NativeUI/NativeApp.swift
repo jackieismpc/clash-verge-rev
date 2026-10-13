@@ -25,7 +25,9 @@ typealias ViewState<Value> = SwiftUI.State<Value>
 
     init() {
         let transport: any CoreTransport = CommandLine.arguments.contains("--demo")
-            ? DemoTransport() : NativeCoreTransport(options: .application())
+            ? DemoTransport(scenario: CommandLine.arguments.first { $0.hasPrefix("--scenario=") }
+                .flatMap { DemoScenario(rawValue: String($0.dropFirst("--scenario=".count))) } ?? .normal)
+            : NativeCoreTransport(options: .application())
         let model = AppModel(transport: transport)
         _model = ViewState(initialValue: model)
         NativeAppDelegate.model = model
@@ -34,10 +36,11 @@ typealias ViewState<Value> = SwiftUI.State<Value>
     var body: some Scene {
         Window("Clash Native", id: "main") {
             RootView(model: model)
-                .frame(minWidth: 980, minHeight: 680)
+                .frame(minWidth: 980, minHeight: 628)
                 .task { await model.poll() }
         }
-        .defaultSize(width: 1280, height: 820)
+        .defaultSize(width: model.isDemo && CommandLine.arguments.contains("--minimum-window") ? 980 : 1280,
+                     height: model.isDemo && CommandLine.arguments.contains("--minimum-window") ? 680 : 820)
         .defaultLaunchBehavior(.presented)
         .windowToolbarStyle(.unified)
         .commands {
@@ -136,6 +139,12 @@ struct RootView: View {
                     StatusPill(demo: model.isDemo, status: model.snapshot?.coreStatus ?? "stopped", reduceTransparency: reduceTransparency)
                 }
                 ToolbarItemGroup(placement: .primaryAction) {
+                    NetworkFeatureControl(title: "系统代理", status: model.snapshot?.networkFeatures.systemProxy ?? .unavailable, demo: model.isDemo) {
+                        Task { await model.command("toggleSystemProxyDemo") }
+                    }
+                    NetworkFeatureControl(title: "TUN", status: model.snapshot?.networkFeatures.tun ?? .unavailable, demo: model.isDemo) {
+                        Task { await model.command("toggleTunDemo") }
+                    }
                     Button { Task { await model.refresh() } } label: { Label("刷新", systemImage: "arrow.clockwise") }
                         .help("刷新状态（⌘R）")
                     Button { model.showImport = true } label: { Label("导入配置", systemImage: "plus") }
@@ -145,11 +154,34 @@ struct RootView: View {
             }
             .searchable(text: $model.query, prompt: "搜索当前页面")
         }
-        .preferredColorScheme(appearance == "light" ? .light : appearance == "dark" ? .dark : nil)
+        .preferredColorScheme(preferredScheme)
         .sheet(isPresented: $model.showImport) { ImportSheet(model: model) }
         .sheet(isPresented: $model.showFailure) { FailureSheet(failure: model.failure) }
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: model.page)
         .onChange(of: model.page) { _, _ in model.query = "" }
+        .onAppear {
+            guard model.isDemo else { return }
+            DispatchQueue.main.async {
+                guard let window = NSApplication.shared.windows.first(where: { $0.styleMask.contains(.titled) }) else { return }
+                let minimum = CommandLine.arguments.contains("--minimum-window")
+                window.isRestorable = false
+                window.setFrameAutosaveName("")
+                window.setFrame(NSRect(x: window.frame.minX, y: window.frame.minY, width: minimum ? 980 : 1280, height: minimum ? 680 : 820), display: true)
+                window.center()
+                if CommandLine.arguments.contains("--activate-demo") {
+                    window.makeKeyAndOrderFront(nil)
+                    NSApplication.shared.activate(ignoringOtherApps: true)
+                }
+            }
+        }
+    }
+
+    private var preferredScheme: ColorScheme? {
+        if model.isDemo {
+            if CommandLine.arguments.contains("--appearance=light") { return .light }
+            if CommandLine.arguments.contains("--appearance=dark") { return .dark }
+        }
+        return appearance == "light" ? .light : appearance == "dark" ? .dark : nil
     }
 
     @ViewBuilder private var pageContent: some View {

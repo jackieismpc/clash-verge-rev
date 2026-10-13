@@ -58,6 +58,24 @@ double-click, Return, or the explicit use action sends a selection command.
 HTTP/HTTPS subscription address. Demo import only appends a labelled in-memory
 sample; parsing and remote download belong to the Rust transport.
 
+Rules include the engine's provider list and update actions, plus a persistent
+YAML override editor. Activity includes connection detail, close actions, log
+level/search filters and pause/resume of display; pausing retains a bounded copy
+while transport logging continues. Latency progress uses request IDs so an old
+batch cannot count toward a new test. System proxy/TUN controls remain disabled
+in the real transport until their Mac adapters are implemented.
+
+Anonymous visual fixtures can be selected without modifying system preferences:
+
+```sh
+open -n '.work/native-ui/Clash Native.app' --args --demo --appearance=dark
+open -n '.work/native-ui/Clash Native.app' --args --demo --page=nodes --scenario=largeList --minimum-window
+open -n '.work/native-ui/Clash Native.app' --args --demo --page=rules --rules=providers
+```
+
+Other `--scenario` values are `empty`, `error`, `loading`, `networkApplying`,
+`networkFailed` and `networkOn`. These are fixture states, not real network modes.
+
 ## Transport boundary
 
 `TransportModels.swift` defines Codable, Sendable presentation records and the

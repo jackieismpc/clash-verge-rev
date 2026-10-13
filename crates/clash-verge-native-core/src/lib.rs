@@ -1009,9 +1009,9 @@ async fn background_read(
                     );
                     let value = controller.request("GET", &path, None).await;
                     match value {
-                        Ok(value) => json!({"name":name,"delay":value["delay"],"url":url,"testedAt":now()}),
+                        Ok(value) => json!({"name":name,"delay":value["delay"],"url":url,"testedAt":now(),"requestId":request.id}),
                         Err(error) => {
-                            json!({"name":name,"delay":null,"url":url,"testedAt":now(),"error":format!("{error:#}")})
+                            json!({"name":name,"delay":null,"url":url,"testedAt":now(),"requestId":request.id,"error":format!("{error:#}")})
                         }
                     }
                 },

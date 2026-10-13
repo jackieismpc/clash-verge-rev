@@ -9,6 +9,7 @@ struct NodeRecord: Codable, Identifiable, Sendable, Hashable {
     var available: Bool
     var testedAt: Double? = nil
     var testURL: String? = nil
+    var testRequestID: String? = nil
     var latencySort: Int { latencyMS ?? Int.max }
 }
 
@@ -35,6 +36,48 @@ struct ConnectionRecord: Codable, Identifiable, Sendable, Hashable {
     var node: String
     var uploadBytes: UInt64
     var downloadBytes: UInt64
+    var source: String? = nil
+    var network: String? = nil
+    var process: String? = nil
+    var startedAt: String? = nil
+    var rulePayload: String? = nil
+}
+
+struct ProviderRecord: Codable, Identifiable, Sendable, Hashable {
+    var id: String { category + ":" + name }
+    var name: String
+    var category: String
+    var vehicle: String
+    var behavior: String
+    var count: Int
+    var updatedAt: String?
+}
+
+enum NetworkFeatureStatus: String, Codable, Sendable, CaseIterable {
+    case unavailable, off, on, applying, failed
+    var title: String {
+        switch self {
+        case .unavailable: "尚未接通"
+        case .off: "已关闭"
+        case .on: "已开启"
+        case .applying: "正在应用…"
+        case .failed: "需要修复"
+        }
+    }
+}
+
+struct NetworkFeatures: Codable, Sendable {
+    var systemProxy: NetworkFeatureStatus = .unavailable
+    var tun: NetworkFeatureStatus = .unavailable
+}
+
+enum LogPresentation {
+    static func filter(_ records: [LogRecord], level: String, query: String) -> [LogRecord] {
+        records.filter {
+            (level == "all" || $0.level.lowercased() == level) &&
+            (query.isEmpty || $0.message.localizedCaseInsensitiveContains(query))
+        }
+    }
 }
 
 struct LogRecord: Codable, Identifiable, Sendable, Hashable {
@@ -90,6 +133,8 @@ struct CoreSnapshot: Codable, Sendable {
     var backups: [BackupRecord] = []
     var overrides: String = "{}"
     var profileDocuments: [String: String] = [:]
+    var providers: [ProviderRecord] = []
+    var networkFeatures: NetworkFeatures = NetworkFeatures()
 }
 
 struct CommandEnvelope: Codable, Sendable {

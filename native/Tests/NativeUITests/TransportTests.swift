@@ -57,3 +57,48 @@ import Testing
     #expect(decoded.nodes.count == state.nodes.count)
     #expect(decoded.generation == state.generation)
 }
+
+@Test func logFiltersCombineLevelAndSearch() {
+    let records = [LogRecord(id: "1", timestamp: 0, level: "error", message: "DNS timeout"),
+                   LogRecord(id: "2", timestamp: 0, level: "info", message: "DNS ready")]
+    #expect(LogPresentation.filter(records, level: "error", query: "dns").map(\.id) == ["1"])
+    #expect(LogPresentation.filter(records, level: "all", query: "ready").map(\.id) == ["2"])
+    #expect(LogPresentation.filter(records, level: "warning", query: "").isEmpty)
+}
+
+@Test func demoNetworkStatesAndProviderUpdatesHaveNoCoreSideEffects() async throws {
+    for scenario in [DemoScenario.networkApplying, .networkFailed, .networkOn] {
+        let demo = DemoTransport(scenario: scenario)
+        let state = try await demo.snapshot()
+        #expect(state.coreStatus == "demo")
+        #expect(state.networkFeatures.systemProxy != .unavailable)
+        #expect(demo.isDemo)
+    }
+    let demo = DemoTransport()
+    let initial = try await demo.snapshot()
+    let provider = try #require(initial.providers.first)
+    let updated = try await demo.execute(CommandEnvelope(command: "updateProvider", payload: ["providerID": provider.id]))
+    #expect(updated.providers.first?.updatedAt != nil)
+    #expect(updated.coreStatus == "demo")
+    let empty = try await DemoTransport(scenario: .empty).snapshot()
+    #expect(empty.nodes.isEmpty && empty.providers.isEmpty)
+}
+
+@Test @MainActor func latencyProgressIgnoresEarlierBatchAndFinishesCurrentRequest() async throws {
+    let demo = DemoTransport()
+    _ = try await demo.execute(CommandEnvelope(requestID: "earlier", command: "testNode", payload: ["nodeID": "hk-01"]))
+    let model = AppModel(transport: demo)
+    await model.refresh()
+    model.testNodes(nodeID: "hk-01")
+    #expect(model.testCompleted == 0)
+    #expect(model.testTotal == 1)
+    let deadline = Date().addingTimeInterval(3)
+    while model.testingNodes && Date() < deadline {
+        try await Task.sleep(for: .milliseconds(20))
+        await model.refresh()
+    }
+    #expect(!model.testingNodes)
+    #expect(model.testCompleted == 1)
+    #expect(model.snapshot?.nodes.first { $0.id == "hk-01" }?.testRequestID != "earlier")
+    await model.shutdown()
+}

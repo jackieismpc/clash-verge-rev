@@ -17,3 +17,6 @@ target
 .vfox
 .claude
 .zed
+
+.work/
+.build/

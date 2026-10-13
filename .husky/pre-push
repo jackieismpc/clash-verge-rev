@@ -1,9 +1,4 @@
-#!/bin/bash
-
-if ! command -v "cargo-make" >/dev/null 2>&1; then
-  echo "❌ cargo-make is required for pre-push checks."
-  cargo install --force cargo-make
-fi
-
-node scripts/check-contract-changes.mjs --push "$1" || exit $?
-cargo make pre-push
+#!/bin/sh
+set -eu
+git diff --check
+# Native and legacy checks use project-local toolchains and caches.

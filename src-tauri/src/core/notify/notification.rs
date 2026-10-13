@@ -373,11 +373,11 @@ fn sample_frontend_events(uid: &String) -> Vec<(FrontendEvent<'_>, &'static str,
         ),
         (
             FrontendEvent::NoticeMessage {
-                status: NoticeStatus::Info,
+                status: NoticeStatus::SetConfigError,
                 message: Arc::from("ok"),
             },
             "verge://notice-message",
-            json!(["info", "ok"]),
+            json!(["set_config::error", "ok"]),
         ),
         (
             FrontendEvent::TimerUpdated { profile_index: uid },

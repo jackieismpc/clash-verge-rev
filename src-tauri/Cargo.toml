@@ -142,7 +142,6 @@ objc2-app-kit = { version = "0.3.2", features = [
 
 tauri-plugin-autostart = "2.7.0"
 tauri-plugin-global-shortcut = "2.4.0"
-tauri-plugin-updater = "2.13.1"
 
 [dev-dependencies]
 criterion = { workspace = true }

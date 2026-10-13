@@ -37,8 +37,11 @@ README 维护使用方法，本文是唯一进度清单。
   验证：374 项旧 Rust、44 项旧前端测试通过；生成契约与类型/引用检查。
   契约生成复用本机 Rust 和项目缓存，避免访问全局 Cargo 缓存。
   提交主题：`refactor(mac): remove unreachable Windows service failure paths`。
-- [ ] M1.2：清理旧应用更新链路及无用图标/发布资源；保留 mihomo 更新。
-  验证：有效构建、依赖与调用检查。
+- [x] M1.2：移除旧应用 updater、启动检查、安装 IPC、前端入口、配置字段、
+  专属依赖及 Windows 安装图标；保留 mihomo updater 与订阅更新通知。
+  验证：374 项旧 Rust、44 项前端测试；Clippy、契约、类型、lint、Knip、
+  架构与旧 Web 构建通过。有效托盘/原生图标保留至对应旧壳退场。
+  提交主题：`refactor(app): retire upstream application updater`。
 
 ## M2：完成原生 UI
 

@@ -86,7 +86,6 @@ async fn resolve_setup() {
         init_hotkey(),
         init_auto_lightweight_boot(),
         init_auto_backup(),
-        init_silent_updater(),
     );
 
     Handle::refresh_clash();
@@ -136,28 +135,6 @@ async fn init_auto_lightweight_boot() {
 
 async fn init_auto_backup() {
     logging_error!(Type::Setup, AutoBackupManager::global().init().await);
-}
-
-async fn init_silent_updater() {
-    use crate::core::SilentUpdater;
-    use crate::core::handle::Handle;
-
-    logging!(debug, Type::Setup, "Initializing silent updater...");
-
-    let app_handle = Handle::app_handle();
-
-    // Install cached updates before starting background checks.
-    if SilentUpdater::global().try_install_on_startup(app_handle).await {
-        logging!(info, Type::Setup, "Update installed at startup, restarting...");
-        feat::restart_app().await;
-    }
-
-    let app_handle = app_handle.clone();
-    tokio::spawn(async move {
-        SilentUpdater::global().start_background_check(app_handle).await;
-    });
-
-    logging!(info, Type::Setup, "Silent updater initialized");
 }
 
 pub(crate) fn init_signal() {

@@ -16,20 +16,22 @@ const temporary = check ? fs.mkdtempSync(path.join(scratch, 'check-')) : null
 const output = temporary ? path.join(temporary, 'bindings.ts') : BINDINGS
 try {
   execFileSync(
-    'cargo',
+    path.join(ROOT, 'scripts/native-core-build.sh'),
     [
       'run',
-      '-p',
-      'clash-verge',
       '--bin',
       'frontend-contract',
-      '--locked',
+      '--offline',
       '--features',
       'clippy',
       '-q',
       ...(check ? ['--', output] : []),
     ],
-    { cwd: ROOT, stdio: 'inherit' },
+    {
+      cwd: ROOT,
+      stdio: 'inherit',
+      env: { ...process.env, NATIVE_RUST_PACKAGE: 'clash-verge' },
+    },
   )
   const formatted = execFileSync(
     process.execPath,

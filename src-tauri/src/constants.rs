@@ -28,8 +28,6 @@ pub mod timing {
     // mihomo rewrites provider caches in place.
     pub const RUNTIME_PROVIDER_SETTLE: Duration = Duration::from_secs(2);
 
-    // Windows 服务冷启动较慢,避免过早回退 sidecar。
-
     // 回退 sidecar 后继续等待服务就绪并尝试交接。
 
     // 交接时等待 sidecar 释放 ext-controller 通道。

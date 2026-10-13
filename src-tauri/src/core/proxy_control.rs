@@ -25,9 +25,6 @@ use std::{
 };
 use tokio::{sync::Mutex, time::timeout};
 
-const CLEAR_ATTEMPTS: u32 = 3;
-const CLEAR_RETRY_DELAY: Duration = Duration::from_millis(100);
-
 /// Actionable system-proxy failure attached to an `anyhow` chain.
 ///
 /// Classification remains downcastable while the original error stays available for diagnostics.
@@ -43,8 +40,6 @@ pub enum SysproxyFailure {
     GuardStopped { detail: String },
     /// The Core was not ready, so enabling the system proxy was refused.
     CoreNotReady,
-    /// A Windows system call refused the write, usually a transient RPC hiccup.
-    SystemCallFailed,
 }
 
 impl SysproxyFailure {
@@ -56,7 +51,6 @@ impl SysproxyFailure {
             Self::SidecarWhileServiceReady => "SYSPROXY_SIDECAR_WHILE_SERVICE_READY",
             Self::GuardStopped { .. } => "SYSPROXY_GUARD_STOPPED",
             Self::CoreNotReady => "SYSPROXY_CORE_NOT_READY",
-            Self::SystemCallFailed => "SYSPROXY_SYSTEM_CALL_FAILED",
         }
     }
 
@@ -80,7 +74,6 @@ impl std::fmt::Display for SysproxyFailure {
                 write!(f, "system proxy guard stopped after repeated failures: {detail}")
             }
             Self::CoreNotReady => f.write_str("the core is not ready, so the system proxy was not enabled"),
-            Self::SystemCallFailed => f.write_str("a Windows system call failed while writing the system proxy"),
         }
     }
 }
@@ -131,14 +124,7 @@ fn classify_local_failure(error: anyhow::Error) -> anyhow::Error {
     if was_refused_locally(&error) {
         return error.context(SysproxyFailure::PrivilegeRequired);
     }
-    if was_a_failed_system_call(&error) {
-        return error.context(SysproxyFailure::SystemCallFailed);
-    }
     error
-}
-
-const fn was_a_failed_system_call(_error: &anyhow::Error) -> bool {
-    false
 }
 
 fn was_refused_locally(error: &anyhow::Error) -> bool {
@@ -490,7 +476,7 @@ pub async fn apply() -> Result<()> {
 }
 
 pub async fn clear() -> Result<()> {
-    let result = clear_with_retry().await;
+    let result = clear_inner().await;
     // Clear failures must be filed even when a restart aborts before apply.
     settle_table(
         clear_table_effect(&result),
@@ -500,38 +486,6 @@ pub async fn clear() -> Result<()> {
         },
     );
     result
-}
-
-/// A failed system call is usually a transient RPC hiccup, so give it a few tries.
-async fn clear_with_retry() -> Result<()> {
-    use crate::utils::retry::{RetryError, RetryPolicy, retry};
-    retry(
-        RetryPolicy::fixed(
-            std::num::NonZeroUsize::MIN.saturating_add((CLEAR_ATTEMPTS - 1) as usize),
-            CLEAR_RETRY_DELAY,
-        ),
-        |attempt| async move {
-            clear_inner().await.map_err(|error| {
-                if matches!(
-                    SysproxyFailure::from_chain(&error),
-                    Some(SysproxyFailure::SystemCallFailed)
-                ) {
-                    if attempt + 1 < CLEAR_ATTEMPTS as usize {
-                        logging!(
-                            warn,
-                            Type::Core,
-                            "clearing the system proxy failed (attempt {}/{CLEAR_ATTEMPTS}); retrying: {error:#}",
-                            attempt + 1
-                        );
-                    }
-                    RetryError::Retry(error)
-                } else {
-                    RetryError::Stop(error)
-                }
-            })
-        },
-    )
-    .await
 }
 
 #[tracing::instrument(skip_all, level = "info", fields(route = tracing::field::Empty))]

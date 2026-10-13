@@ -100,10 +100,7 @@ export const commands = {
     __TAURI_INVOKE<boolean>('take_dns_override_notice'),
   takeServiceFallbackNotice: () =>
     __TAURI_INVOKE<
-      | { kind: 'unavailable' }
-      | { kind: 'coreRejected'; reason: string }
-      | { kind: 'notAutoStarted' }
-      | null
+      { kind: 'unavailable' } | { kind: 'coreRejected'; reason: string } | null
     >('take_service_fallback_notice'),
   getCoreStartupError: () =>
     __TAURI_INVOKE<
@@ -965,7 +962,6 @@ export type SaveProxyPortsOutcome =
 export type ServiceFallbackNotice =
   | { kind: 'unavailable' }
   | { kind: 'coreRejected'; reason: string }
-  | { kind: 'notAutoStarted' }
 
 export type ServiceHealthKind =
   | 'unknown'

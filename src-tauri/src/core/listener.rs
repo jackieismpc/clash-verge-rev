@@ -509,7 +509,7 @@ fn bind_socket(claim: &BindClaim) -> io::Result<Socket> {
     }
     // Unix can retain closed TCP connections after the previous listener exits.
     // Ignore that transient state. SO_REUSEPORT is intentionally never enabled;
-    // Windows stays exclusive below, and macOS guards overlapping address forms above.
+    // macOS guards overlapping address forms before reserving the listener.
     socket.set_reuse_address(cfg!(unix) && matches!(claim.transport, ListenerTransport::Tcp))?;
 
     socket.bind(&SockAddr::from(claim.socket_addr()))?;

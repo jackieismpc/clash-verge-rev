@@ -355,8 +355,7 @@ pub fn run() -> std::process::ExitCode {
             });
         }
         tauri::RunEvent::Exit => {
-            // Windows session ending currently reaches Tao as WM_ENDSESSION and
-            // destroys the loop without a preventable ExitRequested event.
+            // Finish owned cleanup if the event loop exits without ExitRequested.
             if !handle::Handle::global().is_exiting() {
                 handle::Handle::global().set_is_exiting();
                 if let Some(cleanup_result) = feat::clean_session_ending_with_hard_deadline() {

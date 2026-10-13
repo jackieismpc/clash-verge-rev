@@ -49,23 +49,12 @@ static PENDING_SERVICE_OWNER_NOTICE: Mutex<Option<String>> = Mutex::new(None);
 pub enum ServiceFallbackNotice {
     Unavailable,
     CoreRejected(String),
-    NotAutoStarted,
-}
-
-/// The release installer registers AutoStart.
-const SERVICE_NOT_AUTO_STARTED: &str = "the Windows service is stopped and no longer starts with Windows";
-
-pub(crate) fn is_not_auto_started(reason: &str) -> bool {
-    // Detection prefixes its own context to the reason.
-    reason.contains(SERVICE_NOT_AUTO_STARTED)
 }
 
 pub(crate) fn take_service_fallback_notice() -> Option<ServiceFallbackNotice> {
     let reason = PENDING_SERVICE_FALLBACK_NOTICE.lock().take()?;
     Some(if reason.starts_with(CORE_REJECTED_PREFIX) {
         ServiceFallbackNotice::CoreRejected(reason)
-    } else if is_not_auto_started(&reason) {
-        ServiceFallbackNotice::NotAutoStarted
     } else {
         ServiceFallbackNotice::Unavailable
     })
@@ -1183,7 +1172,7 @@ fn epoch_nanos(rfc3339: &str) -> Option<u64> {
 }
 
 // Allow timestamp granularity; missing load times fall back to settling.
-// Windows may retain the old mtime until a writer closes its handle.
+// Compare content as well as metadata while a helper may be replacing the file.
 fn finished_loading(mtime_ns: Option<u64>, updated_at_ns: Option<u64>) -> bool {
     match (mtime_ns, updated_at_ns) {
         (Some(mtime), Some(updated_at)) => {

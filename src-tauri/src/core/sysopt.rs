@@ -26,8 +26,7 @@ enum ProxyApplyStep {
 }
 
 const fn proxy_apply_steps(sys_enabled: bool, auto_enabled: bool) -> [ProxyApplyStep; 2] {
-    // Disabling PAC clears WinINET proxy flags on Windows, so pure global
-    // proxy mode must clear PAC before enabling Sysproxy.
+    // Clear PAC before enabling the explicit proxy to avoid overlapping modes.
     if sys_enabled && !auto_enabled {
         [ProxyApplyStep::Autoproxy, ProxyApplyStep::Sysproxy]
     } else {
@@ -49,7 +48,6 @@ enum AuthoritativeState {
 
 /// Choose state from reliable evidence that a write landed.
 fn authoritative_state(error: &anyhow::Error, earlier_step_completed: bool) -> AuthoritativeState {
-    // Linux setter success is not reliable write evidence.
     authoritative_state_from(true, error, earlier_step_completed)
 }
 

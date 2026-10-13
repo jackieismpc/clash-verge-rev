@@ -22,9 +22,9 @@ migration progress document; README and interface documents contain usage only.
   mihomo update implementation until a separate core replacement is approved.
 - Do not stop, reconfigure, or take ownership of the user's daily proxy. Use
   separate application data, controller sockets, ports, and service channels.
-- Retire the legacy frontend after SwiftUI visual and interaction acceptance.
-  Keep necessary legacy Rust business code until its native replacement works.
-  Label demonstration data. A visual sample is not a functioning proxy client.
+- SwiftUI is the only interface. Do not add TS/JS, Node, Tauri or a WebView shell.
+  The user approved removal of unmigrated legacy business code; rebuild missing
+  functions on the Rust/mihomo boundary. Label demonstration data.
 - Swift owns native presentation. Rust owns persistent configuration, command
   ordering, core lifecycle, cancellation, and events. Keep the proxy engine
   version fixed during the interface migration.
@@ -34,11 +34,11 @@ migration progress document; README and interface documents contain usage only.
 - Run meaningful existing checks and focused regression tests. Do not add
   unrelated formatting, dependency upgrades, speculative frameworks, or reports
   to commits. Document copyable build and usage instructions.
-  Use `scripts/check-local.sh` for native checks; legacy checks remain in README.md.
+  Use `scripts/check-local.sh` for source auditing, Rust and native Swift checks.
 - Generated contracts remain owned by their producer. Update all consumers when
   changing a command, event, field, or configuration format.
 - Code and comments are English. User-facing text may be Chinese. Keep comments
   limited to constraints that the code cannot express.
 
-The `src` and `src-tauri` guardrails continue to apply while the legacy shell is
-present. The native business library must build without Tauri.
+The Rust business library must remain independent of an application framework.
+Native build inputs are Swift, Rust, system tools and the pinned mihomo binary.

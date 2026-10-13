@@ -7,9 +7,12 @@ pub mod config;
 pub mod controller;
 mod ffi;
 mod isolation;
+mod uri;
 
 use anyhow::{Context, Result, bail};
-use config::{ExecutionMode, MAX_DOCUMENT_BYTES, Options, Profile, Store, atomic_write, now, parse_yaml};
+use config::{
+    ExecutionMode, MAX_DOCUMENT_BYTES, Options, Profile, Store, atomic_write, now, parse_profile_yaml, parse_yaml,
+};
 use controller::{Controller, percent_encode, public_request_allowed, stopped};
 use futures_util::{FutureExt, StreamExt};
 use serde::Deserialize;
@@ -468,15 +471,30 @@ impl Worker {
         match request.command.as_str() {
             "snapshot" => Ok(self.store.snapshot(self.runtime_state.clone())),
             "profile.import" => {
+                config::reject_script_source(args)?;
+                if ["yaml", "url", "uri"]
+                    .iter()
+                    .filter(|key| args.get(**key).is_some())
+                    .count()
+                    != 1
+                {
+                    bail!("exactly one of yaml, url or uri is required");
+                }
                 let url = args.get("url").and_then(Value::as_str);
                 let (yaml, metadata) = match args.get("yaml").and_then(Value::as_str) {
                     Some(yaml) => (yaml.to_string(), json!({})),
+                    None if args.get("uri").is_some() => {
+                        let proxy = uri::parse_uri(string(args, "uri")?)?;
+                        let node_name = proxy["name"].as_str().context("invalid proxy name")?;
+                        let profile = json!({"proxies": [proxy], "proxy-groups": [{"name": "Imported", "type": "select", "proxies": [node_name]}], "rules": ["MATCH,Imported"]});
+                        (serde_yaml_ng::to_string(&profile)?, json!({}))
+                    }
                     None => {
                         self.fetch_profile(url.context("yaml or url is required")?, cancel)
                             .await?
                     }
                 };
-                let parsed = parse_yaml(&yaml)?;
+                let parsed = parse_profile_yaml(&yaml)?;
                 if url.is_some() && parsed.get("proxies").is_none() && parsed.get("proxy-providers").is_none() {
                     bail!("remote profile must contain proxies or proxy-providers");
                 }
@@ -517,7 +535,7 @@ impl Worker {
                         (yaml, Some(metadata))
                     }
                 };
-                parse_yaml(&yaml)?;
+                parse_profile_yaml(&yaml)?;
                 let mut candidate = self.store.clone();
                 let profile = candidate.profile_mut(id)?;
                 profile.yaml = yaml;

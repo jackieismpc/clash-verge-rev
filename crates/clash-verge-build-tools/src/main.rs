@@ -8,6 +8,8 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+mod audit;
+mod updates;
 
 const MAX_ARCHIVE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 128 * 1024 * 1024;
@@ -110,7 +112,7 @@ async fn publish(path: &Path, bytes: &[u8], executable: bool) -> Result<()> {
 
 async fn prepare(root: &Path, offline: bool) -> Result<()> {
     let lock: ArtifactLock =
-        serde_json::from_slice(&tokio::fs::read(root.join("src-tauri/core-artifacts.json")).await?)?;
+        serde_json::from_slice(&tokio::fs::read(root.join("resources/core-artifacts.json")).await?)?;
     let artifact = validate(&lock)?;
     let directory = root.join(".work/engines");
     tokio::fs::create_dir_all(&directory).await?;
@@ -196,15 +198,44 @@ async fn main() -> Result<()> {
         bail!("native assets require Apple Silicon macOS");
     }
     let arguments: Vec<_> = std::env::args().skip(1).collect();
-    if arguments.iter().any(|argument| argument != "--offline") {
-        bail!("usage: native-core-assets [--offline]");
-    }
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
         .context("missing repository root")?
         .to_path_buf();
-    prepare(&root, arguments.iter().any(|argument| argument == "--offline")).await
+    match arguments.as_slice() {
+        [] => prepare(&root, false).await,
+        [flag] if flag == "--offline" => prepare(&root, true).await,
+        [flag] if flag == "--audit-source-tree" => audit::check(&root),
+        [flag] if flag == "--check-core-update" => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&updates::check_latest(false).await?)?
+            );
+            Ok(())
+        }
+        [flag, alpha] if flag == "--check-core-update" && alpha == "--alpha" => {
+            println!("{}", serde_json::to_string_pretty(&updates::check_latest(true).await?)?);
+            Ok(())
+        }
+        [flag] if flag == "--stage-core-update" => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&updates::stage_latest(&root, false).await?)?
+            );
+            Ok(())
+        }
+        [flag, alpha] if flag == "--stage-core-update" && alpha == "--alpha" => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&updates::stage_latest(&root, true).await?)?
+            );
+            Ok(())
+        }
+        _ => bail!(
+            "usage: native-core-assets [--offline | --audit-source-tree | --check-core-update [--alpha] | --stage-core-update [--alpha]]"
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -250,11 +281,11 @@ mod tests {
                 .as_nanos()
         ));
         let directory = root.join(".work/engines");
-        tokio::fs::create_dir_all(root.join("src-tauri")).await?;
+        tokio::fs::create_dir_all(root.join("resources")).await?;
         tokio::fs::create_dir_all(&directory).await?;
         let digest = "0".repeat(64);
         let lock = serde_json::json!({"target":"aarch64-apple-darwin","cores":{"stable":{"version":"fixture","url":"https://github.com/MetaCubeX/mihomo/releases/download/fixture/core.gz","sha256":digest}}});
-        tokio::fs::write(root.join("src-tauri/core-artifacts.json"), serde_json::to_vec(&lock)?).await?;
+        tokio::fs::write(root.join("resources/core-artifacts.json"), serde_json::to_vec(&lock)?).await?;
         tokio::fs::write(directory.join(format!("{digest}.gz")), b"corrupted archive").await?;
         tokio::fs::write(directory.join("mihomo"), b"previous verified core").await?;
         tokio::fs::write(directory.join("verified.json"), b"previous metadata").await?;

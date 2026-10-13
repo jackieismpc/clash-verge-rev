@@ -21,15 +21,15 @@ Rust 负责业务和运行管理，SwiftUI 负责原生界面。
   校验与 gzip 解压由 Rust 完成，不依赖 Node/pnpm。
 - 独立 Rust 业务库：配置事务、订阅获取、独立内核生命周期、Unix
   controller、状态流、解锁检测和本地备份；不依赖 Tauri。
-- React/Tauri 保留为迁移期间的功能对照。原生系统代理、DNS/TUN、
+- TS/JS、React、Node 工具和 Tauri 源码/插件/依赖均已删除。原生系统代理、DNS/TUN、
   旧数据导入及完整产品验收仍在实施中，尚不作为日常代理替代品。
 
 ## 本地开发
 
 复用本机已安装的 Rust 和 Swift 工具链。脚本不会安装工具链或修改全局
 默认工具链。构建、缓存、临时文件、测试数据和本地应用放在 Git 忽略的
-`.work/`。Tauri 的 `src-tauri/resources`、`src-tauri/sidecar` 也是忽略的
-生成目录。不要提交下载的二进制或运行数据。
+`.work/`。固定内核清单位于 `resources/core-artifacts.json`；不要提交
+下载的二进制、私有配置或运行数据。
 
 ```sh
 scripts/native-core-assets.sh
@@ -50,10 +50,18 @@ Swift → Rust → mihomo 集成，不安装工具或调用 Node。详细界面�
 系统代理、DNS、路由、TUN 或服务。发布签名与公证尚未实施；当前本地
 Swift 应用只有 ad-hoc 签名。
 
-mihomo 内核更新实现和接口继续保留，暂不自研或更换内核。当前原生
-构建固定已校验版本作为迁移基线；原生更新入口尚待接入。应用自身的
-上游自动更新链路已删除。旧 React/Tauri 及 Node 依赖暂用于未迁移功能的
-对照和回归检查，待系统代理、DNS/TUN 与旧数据迁移接通后再删除。
+mihomo 固定基线保持 `v1.19.32`；内核更新链路已移入 Rust 工具，可显式
+查询官方 stable/alpha 版本并准备经过架构、签名和版本检查的候选：
+
+```sh
+scripts/native-core-assets.sh --check-core-update
+scripts/native-core-assets.sh --stage-core-update
+# 如需预发布候选，在上述命令末尾追加 --alpha
+```
+
+候选保存在 `.work/core-updates/`，不会自动替换或重启当前内核。候选报告
+中的 SHA256 是本次文件摘要，不代表供应方签名。界面激活入口仍待接入；
+应用自身的上游更新已移除。删除的旧功能可从 Git 历史对照后重新开发。
 
 ## 维护
 
@@ -66,17 +74,5 @@ git commit -s -S -m "fix(component): describe the change"
 git verify-commit HEAD
 ```
 
-React/Tauri 仍在迁移中，涉及旧壳时使用已安装的 Node/pnpm 运行相关检查：
-
-```sh
-pnpm typecheck
-pnpm test
-pnpm lint
-pnpm format:check
-pnpm arch:check
-pnpm knip:check
-pnpm gen:contract --check
-```
-
-删除旧界面后会一并删除这些工具和配置。AGENTS.md 只记录实际开发
-约束；不保留其他重复的 AI 工具说明。
+`scripts/check-local.sh` 会同时阻止 TS/JS/Tauri 回流，以及私有运行配置、
+日志或下载产物被加入 Git。AGENTS.md 只记录实际开发约束。

@@ -157,7 +157,7 @@ struct ProfilesView: View {
                     let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
                     guard size <= 16 * 1024 * 1024 else { throw ClientFailure(code: "file_too_large", message: "配置文件超过 16 MiB", detail: url.lastPathComponent, retryable: false) }
                     let yaml = try String(contentsOf: url, encoding: .utf8)
-                    await model.command("importProfile", payload: ["name": url.deletingPathExtension().lastPathComponent, "yaml": yaml])
+                    await model.command("importProfile", payload: ["name": url.deletingPathExtension().lastPathComponent, "filename": url.lastPathComponent, "yaml": yaml])
                 } catch { model.report(error) }
             }
         }
@@ -353,7 +353,7 @@ struct ImportSheet: View {
     @ViewState private var source = ""
     @ViewState private var kind = "yaml"
     private var valid: Bool {
-        if kind == "yaml" { return !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        if kind == "yaml" || kind == "uri" { return !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         guard let url = URL(string: source), ["https", "http"].contains(url.scheme?.lowercased() ?? ""), url.host != nil else { return false }
         return true
     }
@@ -368,6 +368,7 @@ struct ImportSheet: View {
             Picker("来源类型", selection: $kind) {
                 Text("YAML 内容").tag("yaml")
                 Text("订阅地址").tag("url")
+                Text("节点链接").tag("uri")
             }.pickerStyle(.segmented)
             if kind == "url" { TextField("https://example.com/subscription", text: $source) }
             else {
@@ -376,6 +377,8 @@ struct ImportSheet: View {
                     .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.secondary.opacity(0.25)))
             }
             if !source.isEmpty && !valid { Text("请输入有效的 HTTP 或 HTTPS 订阅地址。 ").font(.system(size: 12)).foregroundStyle(.red) }
+            Text("自定义 JavaScript 不执行。旧脚本请保留原文件，并将配置变更迁到 YAML 覆盖。")
+                .font(.system(size: 12)).foregroundStyle(.secondary)
             if let failure = model.failure {
                 Text(failure.message).font(.system(size: 12)).foregroundStyle(.red)
                 DisclosureGroup("错误详情") {

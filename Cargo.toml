@@ -1,16 +1,10 @@
 [workspace]
 members = [
-  "src-tauri",
-  "crates/clash-verge-draft",
-  "crates/clash-verge-media-unlock",
-  "crates/clash-verge-logging",
-  "crates/clash-verge-signal",
-  "crates/tauri-plugin-clash-verge-sysinfo",
-  "crates/clash-verge-i18n",
-  "crates/clash-verge-limiter",
   "crates/clash-verge-native-core",
   "crates/clash-verge-build-tools",
+  "crates/clash-verge-media-unlock",
 ]
+default-members = ["crates/clash-verge-native-core", "crates/clash-verge-build-tools"]
 resolver = "2"
 
 [profile.release]
@@ -34,62 +28,17 @@ overflow-checks = true
 lto = false
 rpath = false
 
-[profile.fast-release]
-inherits = "release"
-codegen-units = 64
-incremental = true
-lto = false
-opt-level = 0
-debug = true
-strip = false
-
-[profile.debug-release]
-inherits = "fast-release"
-codegen-units = 1
-split-debuginfo = "unpacked"
-
 [workspace.dependencies]
-clash-verge-draft = { path = "crates/clash-verge-draft" }
 clash-verge-media-unlock = { path = "crates/clash-verge-media-unlock" }
-clash-verge-logging = { path = "crates/clash-verge-logging" }
-clash-verge-signal = { path = "crates/clash-verge-signal" }
-clash-verge-i18n = { path = "crates/clash-verge-i18n" }
-clash-verge-limiter = { path = "crates/clash-verge-limiter" }
-tracing-estuary = { git = "https://github.com/Tunglies/tracing-estuary.git", branch = "main" }
-tauri-plugin-clash-verge-sysinfo = { path = "crates/tauri-plugin-clash-verge-sysinfo" }
-tracing = "0.1.44"
-
-tauri = { version = "2.12.1" }
-tauri-plugin-clipboard-manager = "2.4.1"
-parking_lot = { version = "0.12.5", features = ["hardware-lock-elision"] }
 anyhow = "1.0.104"
 chrono = "0.4.45"
-criterion = { version = "0.8.2", features = ["async_tokio"] }
-tokio = { version = "1.53.2", features = [
-  "rt-multi-thread",
-  "macros",
-  "time",
-  "sync",
-] }
-flexi_logger = "0.31.10"
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "time", "sync"] }
 log = "0.4.34"
-regex = "1.13.1"
-reqwest = { version = "0.13.5", features = [
-  "json",
-  "cookies",
-  "gzip",
-  "rustls",
-  "form",
-] }
+reqwest = { version = "0.13.5", features = ["json", "cookies", "gzip", "rustls", "form"] }
 rust_iso3166 = "0.2.0"
-
-smartstring = { version = "1.0.1" }
-
 serde = { version = "1.0.229" }
 serde_json = { version = "1.0.151" }
 serde_yaml_ng = { version = "0.10.0" }
-bitflags = { version = "2.13.2" }
-socket2 = "0.6.5"
 
 [workspace.lints.clippy]
 # fallible_impl_from = "deny" // 过于激进，暂时不开启

@@ -44,8 +44,11 @@ checks use the owned local proxy, with TLS verification enabled.
 
 System proxy, TUN and privileged helper commands explicitly return unsupported.
 Runtime reconciliation binds to loopback and disables TUN; it never changes OS
-DNS, proxy or routes. Subscription schedules, node URI conversion, legacy backup
-migration and privileged restoration still require extraction from the old app.
+DNS, proxy or routes. Subscription schedules, legacy backup migration and privileged restoration
+still need implementation. The removed app remains available in Git history.
+`profile.import` accepts exactly one of `yaml`, `url` or `uri`; supported share
+links are converted to mihomo YAML in Rust, with no JavaScript evaluator. Legacy
+script imports receive an explicit rejection and migration hint.
 The local backups here contain native state only and do not read legacy ZIPs.
 Core startup validates the configuration and waits at most 15 seconds for the
 owned Unix controller. Distribution helper/core packaging is a separate step.

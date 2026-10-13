@@ -30,8 +30,9 @@ Native build/test scripts use installed Rust and Swift plus system shell/codesig
 utilities. `clash-verge-build-tools` replaces the Node asset downloader with HTTPS,
 SHA256 verification, arm64 Mach-O validation and bounded gzip extraction. Offline
 mode fails closed on missing/corrupt archives and preserves the previous core.
-The mihomo update implementation remains in the legacy Rust layer and will be
-carried into the native client before retiring that layer.
+The mihomo stable/alpha update chain lives in the Rust build tool. Explicit
+`--check-core-update` and `--stage-core-update` prepare private candidates without
+activating them or changing the pinned baseline. No legacy shell remains.
 
 SDK 27 introduces a SwiftUI `State` macro whose plugin is absent from the current
 Command Line Tools distribution. `ViewState<Value>` explicitly aliases the
@@ -55,7 +56,8 @@ there are no invented application, router/DNS, or day/month totals.
 Nodes use a native searchable and sortable `Table`. A single click inspects;
 double-click, Return, or the explicit use action sends a selection command.
 `⌘O` opens the import sheet and `⌘R` refreshes. The sheet accepts YAML text or an
-HTTP/HTTPS subscription address. Demo import only appends a labelled in-memory
+HTTP/HTTPS subscription address, or a supported node share link. Custom JavaScript
+is rejected with a migration hint; imported files remain unchanged. Demo import only appends a labelled in-memory
 sample; parsing and remote download belong to the Rust transport.
 
 Rules include the engine's provider list and update actions, plus a persistent

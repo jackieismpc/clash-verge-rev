@@ -19,6 +19,7 @@ binary_dir="$(/usr/bin/swift build --package-path "$project_root/native" \
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Frameworks" "$bundle/Contents/Resources"
 cp "$project_root/.work/target/aarch64-apple-darwin/debug/libclash_verge_native_core.dylib" "$bundle/Contents/Frameworks/"
 cp "$project_root/.work/engines/mihomo" "$bundle/Contents/Resources/"
+cp "$project_root/native/Resources/AppIcon.icns" "$bundle/Contents/Resources/"
 /usr/bin/codesign --force --sign - "$bundle/Contents/Frameworks/libclash_verge_native_core.dylib"
 /usr/bin/codesign --force --sign - "$bundle/Contents/Resources/mihomo"
 cp "$binary_dir/ClashNative" "$bundle/Contents/MacOS/ClashNative"
@@ -29,6 +30,7 @@ cat > "$bundle/Contents/Info.plist" <<'PLIST'
 <key>CFBundleExecutable</key><string>ClashNative</string>
 <key>CFBundleIdentifier</key><string>io.github.jackieismpc.clash-verge-native</string>
 <key>CFBundleName</key><string>Clash Native</string>
+<key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>0.1.0</string>
 <key>CFBundleVersion</key><string>1</string>

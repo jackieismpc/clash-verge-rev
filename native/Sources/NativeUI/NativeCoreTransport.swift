@@ -204,8 +204,10 @@ actor NativeCoreTransport: CoreTransport {
         case "refresh": projectionRevision = nil
         case "importProfile":
             var args: [String: WireValue] = ["name": .string(payload["name"] ?? "新配置")]
+            if let filename = payload["filename"] { args["filename"] = .string(filename) }
             if let url = payload["url"] { args["url"] = .string(url) }
             else if let yaml = payload["yaml"] { args["yaml"] = .string(yaml) }
+            else if let uri = payload["uri"] { args["uri"] = .string(uri) }
             else {
                 let source = payload["source"] ?? ""
                 let kind = source.hasPrefix("https://") || source.hasPrefix("http://") ? "url" : "yaml"

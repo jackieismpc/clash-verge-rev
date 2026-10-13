@@ -66,6 +66,65 @@ fn request(id: &str, command: &str, args: Value) -> Request {
 }
 
 #[test]
+fn uri_import_uses_the_transaction_and_rejects_ambiguous_sources() {
+    let dir = TestDir::new();
+    let client = Client::open(dir.options()).unwrap();
+    let uri = "vless://00000000-0000-0000-0000-000000000000@[2001:db8::1]:443?security=reality&pbk=sample&sid=00&type=ws&path=%2Fproxy#Sample";
+    assert_eq!(client.submit(request("uri", "profile.import", json!({"uri": uri}))), 0);
+    assert_eq!(result(&client, "uri")["ok"], true);
+    let snapshot = client.snapshot();
+    let yaml = parse_yaml(snapshot["data"]["profiles"][0]["yaml"].as_str().unwrap()).unwrap();
+    assert_eq!(yaml["proxies"][0]["server"].as_str(), Some("2001:db8::1"));
+    assert_eq!(
+        yaml["proxies"][0]["reality-opts"]["public-key"].as_str(),
+        Some("sample")
+    );
+    assert_eq!(yaml["proxy-groups"][0]["proxies"][0].as_str(), Some("Sample"));
+    assert_eq!(yaml["rules"][0].as_str(), Some("MATCH,Imported"));
+    assert_eq!(
+        client.submit(request(
+            "ambiguous",
+            "profile.import",
+            json!({"uri": uri, "yaml": "{}"})
+        )),
+        0
+    );
+    assert_eq!(result(&client, "ambiguous")["ok"], false);
+    assert_eq!(client.snapshot()["data"]["revision"], snapshot["data"]["revision"]);
+    drop(client);
+    let reopened = Client::open(dir.options()).unwrap();
+    assert_eq!(reopened.snapshot()["data"]["profiles"], snapshot["data"]["profiles"]);
+}
+
+#[test]
+fn script_import_is_explicit_and_preserves_the_source_file() {
+    let dir = TestDir::new();
+    let source = dir.0.join("source.js");
+    let code = "function main(config) { throw new Error('never execute'); }";
+    std::fs::write(&source, code).unwrap();
+    let client = Client::open(dir.options()).unwrap();
+    for (id, args) in [
+        ("code", json!({"yaml": code})),
+        ("file", json!({"yaml": "{}", "filename": "source.JS"})),
+        ("descriptor", json!({"yaml": "type: script\nfile: source.js\n"})),
+        ("kind", json!({"yaml": "{}", "sourceKind": "script"})),
+    ] {
+        assert_eq!(client.submit(request(id, "profile.import", args)), 0);
+        let event = result(&client, id);
+        assert_eq!(event["ok"], false);
+        assert!(
+            event["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Keep the original file")
+        );
+    }
+    assert_eq!(std::fs::read_to_string(source).unwrap(), code);
+    assert!(client.snapshot()["data"]["profiles"].as_array().unwrap().is_empty());
+    assert!(config::parse_profile_yaml("description: 'function main is just a description'\n").is_ok());
+}
+
+#[test]
 fn integration_mode_rejects_foreign_directories_and_links() {
     let dir = TestDir::integration();
     let mut options = dir.integration_options();

@@ -3,8 +3,6 @@ use std::time::Duration;
 use reqwest::Client;
 use tokio::task::JoinSet;
 
-use clash_verge_logging::{Type, logging};
-
 mod bahamut;
 mod bilibili;
 mod chatgpt;
@@ -129,7 +127,7 @@ where
                 on_complete(&item);
                 results.push(item);
             }
-            Err(e) => logging!(error, Type::Network, "任务执行失败: {e}"),
+            Err(e) => log::error!("任务执行失败: {e}"),
         }
 
         if let Some(check) = checks.next() {

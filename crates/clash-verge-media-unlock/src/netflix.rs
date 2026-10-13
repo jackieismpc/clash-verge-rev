@@ -3,8 +3,6 @@ use std::time::Duration;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 
-use clash_verge_logging::{Type, logging};
-
 use super::UnlockItem;
 
 pub(crate) const NETFLIX_NAME: &str = "Netflix";
@@ -78,7 +76,7 @@ async fn check_region(client: &Client) -> UnlockItem {
     {
         Ok(res) => res,
         Err(e) => {
-            logging!(error, Type::Network, "获取 Netflix 区域信息失败: {e}");
+            log::error!("获取 Netflix 区域信息失败: {e}");
             return item("Yes (但无法获取区域)");
         }
     };
@@ -104,7 +102,7 @@ async fn check_netflix_cdn(client: &Client) -> UnlockItem {
     {
         Ok(res) => res,
         Err(e) => {
-            logging!(error, Type::Network, "Fast.com API 请求失败: {e}");
+            log::error!("Fast.com API 请求失败: {e}");
             return item("Failed (CDN API)");
         }
     };
@@ -120,7 +118,7 @@ async fn check_netflix_cdn(client: &Client) -> UnlockItem {
             .map(|target| UnlockItem::checked_region(NETFLIX_NAME, "Yes", &target.location.country))
             .unwrap_or_else(|| item("Unknown")),
         Err(e) => {
-            logging!(error, Type::Network, "解析 Fast.com API 响应失败: {e}");
+            log::error!("解析 Fast.com API 响应失败: {e}");
             item("Failed (解析错误)")
         }
     }

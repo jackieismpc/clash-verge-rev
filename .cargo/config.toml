@@ -7,4 +7,3 @@ MACOSX_DEPLOYMENT_TARGET = "26.0"
 
 [alias]
 clippy-all = "clippy --all-targets --all-features -- -D warnings"
-clippy-only = "clippy --all-targets --features clippy -- -D warnings"

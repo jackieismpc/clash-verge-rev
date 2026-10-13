@@ -23,6 +23,33 @@ private func unusedPort() throws -> UInt16 {
     return UInt16(bigEndian: address.sin_port)
 }
 
+@Test func nativeURIImportValidatesWithOwnedMihomoAndRejectsScripts() async throws {
+    let environment = ProcessInfo.processInfo.environment
+    let library = try #require(environment["CVN_LIBRARY_PATH"])
+    let mihomo = try #require(environment["CVN_MIHOMO_PATH"])
+    let root = try #require(environment["CVN_TEST_ROOT"])
+    let directory = URL(fileURLWithPath: root).appendingPathComponent("u-" + UUID().uuidString.prefix(8))
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let transport = NativeCoreTransport(options: NativeCoreOptions(libraryPath: library, dataDirectory: directory.path, mihomoPath: mihomo, mixedPort: try unusedPort(), executionMode: .integrationTest, integrationRoot: root))
+    do {
+        let imported = try await transport.execute(CommandEnvelope(command: "importProfile", payload: ["name": "链接样本", "uri": "ss://YWVzLTEyOC1nY206ZXhhbXBsZQ@example.invalid:443#Sample"]))
+        #expect(imported.profiles.count == 1)
+        let started = try await transport.execute(CommandEnvelope(command: "startCore"))
+        #expect(started.coreStatus == "running")
+        #expect(started.nodes.contains { $0.group == "Imported" && $0.name == "Sample" })
+        #expect(started.rules.contains { $0.target == "Imported" })
+        _ = try await transport.execute(CommandEnvelope(command: "stopCore"))
+        await #expect(throws: ClientFailure.self) {
+            try await transport.execute(CommandEnvelope(command: "importProfile", payload: ["filename": "legacy.js", "yaml": "function main(config) { return config; }"]))
+        }
+        #expect(try await transport.snapshot().profiles.count == 1)
+        await transport.shutdown()
+    } catch {
+        await transport.shutdown()
+        throw error
+    }
+}
+
 @Test func rustBridgeRunsOwnedMihomoAndRestoresNativeBackup() async throws {
     let environment = ProcessInfo.processInfo.environment
     let library = try #require(environment["CVN_LIBRARY_PATH"])

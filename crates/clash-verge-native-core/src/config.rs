@@ -112,7 +112,7 @@ impl Store {
             if !ids.insert(&p.id) || p.id.is_empty() {
                 bail!("duplicate or empty profile ID");
             }
-            parse_yaml(&p.yaml)?;
+            parse_profile_yaml(&p.yaml)?;
             if !["local", "remote"].contains(&p.kind.as_str()) {
                 bail!("invalid profile kind");
             }
@@ -134,10 +134,11 @@ impl Store {
     }
     pub fn runtime_yaml(&self, socket: &Path, secret: &str) -> Result<String> {
         let mut yaml = match &self.selected_profile_id {
-            Some(id) => parse_yaml(&self.profile(id)?.yaml)?,
+            Some(id) => parse_profile_yaml(&self.profile(id)?.yaml)?,
             None => parse_yaml("proxies: []\nproxy-groups: []\nrules: [\"MATCH,DIRECT\"]\n")?,
         };
         merge(&mut yaml, parse_yaml(&self.overrides)?);
+        apply_compatibility(&mut yaml);
         let root = yaml.as_mapping_mut().context("profile root must be a mapping")?;
         // Engine protocol fields are intentionally left intact. Only endpoints and
         // privileged effects owned by this client are reconciled here.
@@ -204,6 +205,55 @@ pub fn parse_yaml(text: &str) -> Result<Value> {
     Ok(yaml)
 }
 
+const SCRIPT_MIGRATION: &str = "Custom JavaScript profiles are unsupported. Keep the original file and migrate its changes to YAML overrides; no script was executed.";
+
+pub fn reject_script_source(args: &Json) -> Result<()> {
+    if args.get("sourceKind").and_then(Json::as_str) == Some("script")
+        || args.get("filename").and_then(Json::as_str).is_some_and(|name| {
+            ["js", "mjs", "cjs"].contains(
+                &name
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase()
+                    .as_str(),
+            )
+        })
+    {
+        bail!(SCRIPT_MIGRATION);
+    }
+    Ok(())
+}
+
+pub fn parse_profile_yaml(text: &str) -> Result<Value> {
+    let yaml = match parse_yaml(text) {
+        Err(_) if text.contains("function main") || text.contains("const main") || text.contains("let main") => {
+            bail!(SCRIPT_MIGRATION);
+        }
+        result => result?,
+    };
+    if yaml.get("type").and_then(Value::as_str) == Some("script") {
+        bail!(SCRIPT_MIGRATION);
+    }
+    Ok(yaml)
+}
+
+fn apply_compatibility(yaml: &mut Value) {
+    if yaml["mode"].as_str() == Some("script") {
+        yaml["mode"] = "rule".into();
+    }
+    if let Some(proxies) = yaml.get_mut("proxies").and_then(Value::as_sequence_mut) {
+        for proxy in proxies {
+            if proxy["type"].as_str() == Some("hysteria")
+                && let Some(alpn) = proxy.get_mut("alpn")
+                && alpn.is_string()
+            {
+                *alpn = Value::Sequence(vec![alpn.clone()]);
+            }
+        }
+    }
+}
+
 fn merge(target: &mut Value, source: Value) {
     match (target, source) {
         (Value::Mapping(target), Value::Mapping(source)) => {
@@ -267,6 +317,17 @@ pub async fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn builtin_compatibility_keeps_protocol_and_nested_fields() {
+        let mut yaml = parse_yaml("mode: script\nproxies: [{type: hysteria, alpn: h3, future: keep}, {type: hysteria2, alpn: h3}, {type: hysteria, alpn: [h3]}]\nFuture: {MixedCase: keep}\n").unwrap();
+        apply_compatibility(&mut yaml);
+        assert_eq!(yaml["mode"].as_str(), Some("rule"));
+        assert_eq!(yaml["proxies"][0]["alpn"][0].as_str(), Some("h3"));
+        assert_eq!(yaml["proxies"][0]["future"].as_str(), Some("keep"));
+        assert_eq!(yaml["proxies"][1]["alpn"].as_str(), Some("h3"));
+        assert_eq!(yaml["proxies"][2]["alpn"][0].as_str(), Some("h3"));
+        assert_eq!(yaml["Future"]["MixedCase"].as_str(), Some("keep"));
+    }
     #[test]
     fn runtime_preserves_protocol_fields_and_merges_without_privilege() {
         let mut store = Store::new(19881);

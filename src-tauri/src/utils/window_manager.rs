@@ -44,7 +44,6 @@ fn should_handle_window_operation() -> bool {
 pub struct WindowManager;
 
 impl WindowManager {
-    #[cfg(target_os = "macos")]
     fn set_macos_activation_policy_regular() {
         logging!(debug, Type::Window, "应用 macOS 特定的激活策略");
         handle::Handle::global().set_activation_policy_regular();
@@ -178,13 +177,13 @@ impl WindowManager {
 
     fn activate_window(window: &WebviewWindow<Wry>) -> WindowOperationResult {
         logging!(debug, Type::Window, "开始激活窗口");
-        #[cfg(target_os = "macos")]
+
         Self::set_macos_activation_policy_regular();
 
         // After renderer termination, defer show/focus until reload finishes to avoid a white flash.
         #[allow(unused_mut)]
         let mut defer_show_to_page_load = false;
-        #[cfg(target_os = "macos")]
+
         if crate::utils::resolve::window::take_webview_needs_reload() {
             logging!(info, Type::Window, "渲染进程曾被系统终止，激活窗口前重载页面");
             match window.reload() {
@@ -211,16 +210,6 @@ impl WindowManager {
             if let Err(e) = window.set_focus() {
                 logging!(warn, Type::Window, "设置窗口焦点失败: {}", e);
                 operations_successful = false;
-            }
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            if let Err(e) = window.set_always_on_top(true) {
-                logging!(debug, Type::Window, "设置置顶失败（非关键错误）: {}", e);
-            }
-            if let Err(e) = window.set_always_on_top(false) {
-                logging!(debug, Type::Window, "取消置顶失败（非关键错误）: {}", e);
             }
         }
 
@@ -254,7 +243,6 @@ impl WindowManager {
                 return false;
             }
 
-            #[cfg(target_os = "macos")]
             Self::set_macos_activation_policy_regular();
 
             match build_new_window().await {
@@ -275,7 +263,7 @@ impl WindowManager {
         if let Some(window) = Self::get_main_window() {
             let _ = window.destroy();
             logging!(info, Type::Window, "窗口已摧毁");
-            #[cfg(target_os = "macos")]
+
             {
                 logging!(debug, Type::Window, "应用 macOS 特定的激活策略");
                 handle::Handle::global().set_activation_policy_accessory();

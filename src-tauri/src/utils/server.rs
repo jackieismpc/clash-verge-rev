@@ -127,19 +127,7 @@ async fn notify_existing_instance(record: &InstanceRecord) -> bool {
         Ok(client) => client,
         Err(_) => return false,
     };
-    #[cfg(not(target_os = "macos"))]
-    let request = if let Some(arg) = std::env::args().nth(1).as_deref() {
-        if arg.starts_with("clash:") {
-            client
-                .get(format!("http://127.0.0.1:{}/commands/scheme", record.port))
-                .query(&[("param", arg)])
-        } else {
-            client.get(format!("http://127.0.0.1:{}/commands/visible", record.port))
-        }
-    } else {
-        client.get(format!("http://127.0.0.1:{}/commands/visible", record.port))
-    };
-    #[cfg(target_os = "macos")]
+
     let request = client.get(format!("http://127.0.0.1:{}/commands/visible", record.port));
 
     request
@@ -336,12 +324,7 @@ fn instance_record_path() -> Result<PathBuf> {
 fn open_instance_lock(path: &Path) -> Result<std::fs::File> {
     let parent = path.parent().context("singleton lock has no parent")?;
     std::fs::create_dir_all(parent)?;
-    #[cfg(windows)]
-    {
-        crate::core::owner_identity::open_or_create_current_user_lock(path)
-    }
 
-    #[cfg(unix)]
     {
         let mut options = std::fs::OpenOptions::new();
         options.read(true).write(true).create(true);
@@ -361,7 +344,6 @@ fn open_instance_lock(path: &Path) -> Result<std::fs::File> {
 }
 
 fn try_lock_instance(file: &std::fs::File) -> Result<bool> {
-    #[cfg(unix)]
     {
         use std::os::fd::AsRawFd as _;
         let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
@@ -377,21 +359,6 @@ fn try_lock_instance(file: &std::fs::File) -> Result<bool> {
         }
         Err(error).context("failed to lock singleton file")
     }
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawHandle as _;
-        use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, GetLastError};
-        use windows_sys::Win32::Storage::FileSystem::LockFile;
-        let locked = unsafe { LockFile(file.as_raw_handle(), 0, 0, u32::MAX, u32::MAX) };
-        if locked != 0 {
-            return Ok(true);
-        }
-        if unsafe { GetLastError() } == ERROR_LOCK_VIOLATION {
-            return Ok(false);
-        }
-        Err(std::io::Error::last_os_error()).context("failed to lock singleton file")
-    }
 }
 
 fn random_token() -> Result<String> {
@@ -401,9 +368,6 @@ fn random_token() -> Result<String> {
 }
 
 fn read_instance_record(path: &Path) -> Result<InstanceRecord> {
-    #[cfg(windows)]
-    let mut file = crate::core::owner_identity::open_private_current_user_file(path)?;
-    #[cfg(unix)]
     let mut file = {
         use std::os::unix::fs::OpenOptionsExt as _;
         let mut options = std::fs::OpenOptions::new();
@@ -414,7 +378,7 @@ fn read_instance_record(path: &Path) -> Result<InstanceRecord> {
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         bail!("singleton record is not an ordinary file");
     }
-    #[cfg(unix)]
+
     {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
         if metadata.uid() != unsafe { libc::geteuid() } || metadata.permissions().mode() & 0o777 != 0o600 {
@@ -430,9 +394,7 @@ fn write_instance_record(path: &Path, record: &InstanceRecord) -> Result<()> {
     let parent = path.parent().context("singleton record has no parent")?;
     std::fs::create_dir_all(parent)?;
     let temporary = path.with_extension(format!("json.tmp-{}-{}", std::process::id(), &random_token()?[..16]));
-    #[cfg(windows)]
-    let mut file = crate::core::owner_identity::create_private_current_user_file(&temporary)?;
-    #[cfg(unix)]
+
     let mut file = {
         use std::os::unix::fs::OpenOptionsExt as _;
         let mut options = std::fs::OpenOptions::new();
@@ -442,7 +404,7 @@ fn write_instance_record(path: &Path, record: &InstanceRecord) -> Result<()> {
     };
     file.write_all(&serde_json::to_vec(record)?)?;
     file.sync_all()?;
-    #[cfg(unix)]
+
     {
         use std::os::unix::fs::PermissionsExt as _;
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;

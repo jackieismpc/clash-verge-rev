@@ -360,7 +360,7 @@ impl CoreManager {
         self.retain_applied_runtime(&Config::runtime().await, previous, &result);
         result?;
         // Under the lifecycle lock, so a stop for exit waits for this write instead of outrunning it.
-        #[cfg(target_os = "macos")]
+
         {
             let _lifecycle = self.lifecycle_lock.lock().await;
             crate::utils::resolve::dns::sync_public_dns().await;

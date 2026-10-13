@@ -20,9 +20,6 @@ import { type ProxyPortSettings, saveProxyPorts } from '@/services/cmds'
 import { mutate } from '@/services/mutate'
 import { showNotice } from '@/services/notice-service'
 import type { TranslationKey } from '@/types/generated/i18n-keys'
-import getSystem from '@/utils/get-system'
-
-const OS = getSystem()
 
 interface ClashPortViewerRef {
   open: () => void
@@ -49,12 +46,7 @@ const LISTENERS: {
   {
     key: 'redir',
     label: 'settings.modals.clashPort.fields.redir',
-    visible: OS !== 'windows',
-  },
-  {
-    key: 'tproxy',
-    label: 'settings.modals.clashPort.fields.tproxy',
-    visible: OS === 'linux',
+    visible: true,
   },
 ]
 
@@ -79,10 +71,6 @@ const readPortSettings = (
   redir: {
     enabled: verge?.verge_redir_enabled ?? false,
     port: verge?.verge_redir_port ?? 7895,
-  },
-  tproxy: {
-    enabled: verge?.verge_tproxy_enabled ?? false,
-    port: verge?.verge_tproxy_port ?? 7896,
   },
 })
 

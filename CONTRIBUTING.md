@@ -18,6 +18,15 @@ project toolchain. Keep build outputs, fixtures and reports under `.work`, and
 set build environment variables only for the command being run. Do not change
 global shell or Xcode settings.
 
+Native build and validation do not require Node:
+
+```sh
+scripts/native-core-assets.sh
+scripts/native-core-build.sh test --offline
+scripts/native-ui-build.sh
+scripts/native-ui-test.sh
+```
+
 The legacy React/Tauri shell remains a behavior reference until the native
 client passes the retained workflows. Its existing checks are:
 

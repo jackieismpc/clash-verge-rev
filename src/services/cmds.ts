@@ -341,10 +341,6 @@ export async function cmdTestDelay(url: string) {
   return commands.testDelay(url)
 }
 
-export async function invoke_uwp_tool() {
-  return commands.invokeUwpTool().catch((err) => showNotice.error(err, 1500))
-}
-
 export async function openDevTools() {
   return commands.openDevtools()
 }

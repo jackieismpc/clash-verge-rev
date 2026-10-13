@@ -7,7 +7,7 @@ export TMPDIR="$task_work/tmp"
 export CLANG_MODULE_CACHE_PATH="$task_work/cache/clang"
 export SWIFT_MODULECACHE_PATH="$task_work/cache/swift"
 "$project_root/scripts/native-core-build.sh" build --offline
-node "$project_root/scripts/native-core-assets.mjs" --offline
+"$project_root/scripts/native-core-assets.sh" --offline
 export CVN_LIBRARY_PATH="$project_root/.work/target/aarch64-apple-darwin/debug/libclash_verge_native_core.dylib"
 export CVN_MIHOMO_PATH="$project_root/.work/engines/mihomo"
 export CVN_TEST_ROOT="$project_root/.work"

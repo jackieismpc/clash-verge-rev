@@ -42,10 +42,8 @@ struct ConfigValues {
     enable_dns_settings: bool,
     dns_override_confirmation: Option<String>,
     enable_external_controller: bool,
-    #[cfg(not(target_os = "windows"))]
+
     redir_enabled: bool,
-    #[cfg(target_os = "linux")]
-    tproxy_enabled: bool,
 }
 
 #[derive(Debug)]
@@ -137,11 +135,7 @@ async fn get_config_values(profile_uid: &str) -> ConfigValues {
         dns_settings.enabled,
     );
 
-    #[cfg(not(target_os = "windows"))]
     let redir_enabled = verge_arc.verge_redir_enabled.unwrap_or(false);
-
-    #[cfg(target_os = "linux")]
-    let tproxy_enabled = verge_arc.verge_tproxy_enabled.unwrap_or(false);
 
     drop(verge_arc);
     drop(verge);
@@ -156,10 +150,8 @@ async fn get_config_values(profile_uid: &str) -> ConfigValues {
         enable_dns_settings,
         dns_override_confirmation,
         enable_external_controller,
-        #[cfg(not(target_os = "windows"))]
+
         redir_enabled,
-        #[cfg(target_os = "linux")]
-        tproxy_enabled,
     }
 }
 
@@ -307,19 +299,13 @@ fn process_seq_items(
 /// App-owned control-plane keys; DNS settings are captured separately.
 const CONTROL_PLANE_KEYS: &[&str] = &[
     "external-controller",
-    #[cfg(unix)]
     "external-controller-unix",
-    #[cfg(windows)]
-    "external-controller-pipe",
     "external-controller-cors",
     "secret",
     "mixed-port",
     "socks-port",
     "port",
-    #[cfg(not(target_os = "windows"))]
     "redir-port",
-    #[cfg(target_os = "linux")]
-    "tproxy-port",
     "mode",
     "allow-lan",
     "log-level",
@@ -591,8 +577,7 @@ fn merge_default_config(
     socks_enabled: bool,
     http_enabled: bool,
     enable_external_controller: bool,
-    #[cfg(not(target_os = "windows"))] redir_enabled: bool,
-    #[cfg(target_os = "linux")] tproxy_enabled: bool,
+    redir_enabled: bool,
 ) -> Mapping {
     for (key, value) in clash_config.into_iter() {
         if key.as_str() == Some("tun") {
@@ -613,27 +598,14 @@ fn merge_default_config(
                 config.remove("port");
                 continue;
             }
-            #[cfg(target_os = "windows")]
-            {
-                if key.as_str() == Some("redir-port") {
-                    continue;
-                }
-            }
-            #[cfg(not(target_os = "windows"))]
+
             {
                 if key.as_str() == Some("redir-port") && !redir_enabled {
                     config.remove("redir-port");
                     continue;
                 }
             }
-            #[cfg(target_os = "linux")]
-            {
-                if key.as_str() == Some("tproxy-port") && !tproxy_enabled {
-                    config.remove("tproxy-port");
-                    continue;
-                }
-            }
-            #[cfg(not(target_os = "linux"))]
+
             {
                 if key.as_str() == Some("tproxy-port") {
                     config.remove("tproxy-port");
@@ -887,10 +859,8 @@ pub async fn enhance(
         enable_dns_settings,
         dns_override_confirmation,
         enable_external_controller,
-        #[cfg(not(target_os = "windows"))]
+
         redir_enabled,
-        #[cfg(target_os = "linux")]
-        tproxy_enabled,
     } = cfg_vals;
 
     let profile = collect_profile_items(profiles).await?;
@@ -923,10 +893,7 @@ pub async fn enhance(
         socks_enabled,
         http_enabled,
         enable_external_controller,
-        #[cfg(not(target_os = "windows"))]
         redir_enabled,
-        #[cfg(target_os = "linux")]
-        tproxy_enabled,
     );
 
     let config = apply_builtin_scripts(config, clash_core, enable_builtin);
@@ -1219,31 +1186,11 @@ mod merge_default_config_tests {
 
     /// Call with every listener enabled, so a test only says what it is turning off.
     fn merge(config: Mapping, clash_config: Mapping, external_controller: bool) -> Mapping {
-        merge_default_config(
-            config,
-            clash_config,
-            true,
-            true,
-            external_controller,
-            #[cfg(not(target_os = "windows"))]
-            true,
-            #[cfg(target_os = "linux")]
-            true,
-        )
+        merge_default_config(config, clash_config, true, true, external_controller, true)
     }
 
     fn merge_without_optional_listeners(config: Mapping, clash_config: Mapping) -> Mapping {
-        merge_default_config(
-            config,
-            clash_config,
-            false,
-            false,
-            true,
-            #[cfg(not(target_os = "windows"))]
-            false,
-            #[cfg(target_os = "linux")]
-            false,
-        )
+        merge_default_config(config, clash_config, false, false, true, false)
     }
 
     #[test]

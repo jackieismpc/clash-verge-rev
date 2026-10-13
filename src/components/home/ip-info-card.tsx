@@ -21,7 +21,6 @@ import { useTranslation } from 'react-i18next'
 
 import { getIpInfo } from '@/services/api'
 import { useQuery } from '@/services/query-client'
-import getSystem from '@/utils/get-system'
 
 import { EnhancedCard } from './enhanced-card'
 
@@ -261,10 +260,7 @@ export const IpInfoCard = () => {
                     width: 28,
                     textAlign: 'center',
                     flexShrink: 0,
-                    fontFamily:
-                      getSystem() === 'windows'
-                        ? '"twemoji mozilla", sans-serif'
-                        : 'sans-serif',
+                    fontFamily: 'sans-serif',
                   }}
                 >
                   {getCountryFlag(ipInfo?.country_code)}

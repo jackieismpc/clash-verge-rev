@@ -5,10 +5,7 @@ use std::sync::{
 
 use clash_verge_logging::{Type, logging};
 
-#[cfg(unix)]
 mod unix;
-#[cfg(windows)]
-mod windows;
 
 pub(crate) static RUNTIME: OnceLock<Option<tokio::runtime::Runtime>> = OnceLock::new();
 pub(crate) static SHUTDOWN_LATCH: ShutdownLatch = ShutdownLatch::new();
@@ -61,11 +58,7 @@ where
         }
     });
 
-    #[cfg(unix)]
     unix::register(f);
-
-    #[cfg(windows)]
-    windows::register(f);
 }
 
 #[cfg(test)]

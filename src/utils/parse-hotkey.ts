@@ -1,9 +1,5 @@
 import { KeyboardEvent } from 'react'
 
-import getSystem from './get-system'
-
-const OS = getSystem()
-
 export const parseHotkey = (keyEvent: KeyboardEvent) => {
   const nativeEvent = keyEvent.nativeEvent
   const key = nativeEvent.code
@@ -24,12 +20,9 @@ export const parseHotkey = (keyEvent: KeyboardEvent) => {
   switch (temp) {
     case 'CONTROL':
       return 'CTRL'
-    case 'ALT':
-      if (OS === 'macos') {
-        return 'OPTION'
-      } else {
-        return 'ALT'
-      }
+    case 'ALT': {
+      return 'OPTION'
+    }
     case 'META':
     case 'OS':
       return 'CMD'

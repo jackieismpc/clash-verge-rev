@@ -1,6 +1,6 @@
 use anyhow::{Context as _, Result, anyhow, bail};
 use clash_verge_logging::{Type as LogType, logging};
-#[cfg(target_os = "macos")]
+
 use network_interface::{NetworkInterface, NetworkInterfaceConfig as _};
 use serde::{Deserialize, Serialize};
 use serde_yaml_ng::{Mapping, Value};
@@ -14,7 +14,7 @@ use std::{
 /// The config key of the Mixed Port, named once so callers stop spelling it out.
 pub(crate) const MIXED_PORT_KEY: &str = "mixed-port";
 
-const PROXY_LISTENERS: [(&str, &str, &[ListenerTransport]); 5] = [
+const PROXY_LISTENERS: [(&str, &str, &[ListenerTransport]); 4] = [
     (
         MIXED_PORT_KEY,
         "mixed",
@@ -23,11 +23,6 @@ const PROXY_LISTENERS: [(&str, &str, &[ListenerTransport]); 5] = [
     ("socks-port", "socks", &[ListenerTransport::Tcp, ListenerTransport::Udp]),
     ("port", "http", &[ListenerTransport::Tcp]),
     ("redir-port", "redir", &[ListenerTransport::Tcp]),
-    (
-        "tproxy-port",
-        "tproxy",
-        &[ListenerTransport::Tcp, ListenerTransport::Udp],
-    ),
 ];
 
 /// The config key of every proxy listener.
@@ -45,7 +40,6 @@ pub struct ProxyPortSettings {
     pub socks: ToggleableProxyPort,
     pub http: ToggleableProxyPort,
     pub redir: ToggleableProxyPort,
-    pub tproxy: ToggleableProxyPort,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, specta::Type)]
@@ -122,12 +116,7 @@ impl ProxyPortSettings {
         if self.mixed_port == 0 {
             bail!("mixed proxy port must be between 1 and 65535");
         }
-        for (name, listener) in [
-            ("SOCKS", self.socks),
-            ("HTTP", self.http),
-            ("redir", self.redir),
-            ("TProxy", self.tproxy),
-        ] {
+        for (name, listener) in [("SOCKS", self.socks), ("HTTP", self.http), ("redir", self.redir)] {
             if listener.port == 0 {
                 bail!("{name} proxy port must be between 1 and 65535");
             }
@@ -230,10 +219,6 @@ fn proxy_claims(config: &Mapping) -> Result<Vec<BindClaim>> {
     let addresses = proxy_bind_addresses(config)?;
     let mut claims = Vec::new();
     for (key, name, transports) in PROXY_LISTENERS {
-        #[cfg(target_os = "windows")]
-        if matches!(key, "redir-port" | "tproxy-port") {
-            continue;
-        }
         let Some(port) = mapping_port(config, key)? else {
             continue;
         };
@@ -424,7 +409,7 @@ fn probe_claims(claims: &[BindClaim]) -> ListenerProbeOutcome {
 
 fn bind_claim(claim: &BindClaim) -> io::Result<Vec<Socket>> {
     let mut sockets = Vec::new();
-    #[cfg(target_os = "macos")]
+
     if claim.transport == ListenerTransport::Tcp {
         // Darwin permits live wildcard and specific listeners to coexist with SO_REUSEADDR.
         // Hold every overlapping form while probing so they still report a conflict.
@@ -503,13 +488,7 @@ fn bind_claim(claim: &BindClaim) -> io::Result<Vec<Socket>> {
     if claim.transport == ListenerTransport::Tcp {
         socket.listen(1)?;
     }
-    #[cfg(windows)]
-    if claim.transport == ListenerTransport::Tcp
-        && !claim.address.is_unspecified()
-        && windows_wildcard_tcp_listener_exists(claim.address, claim.port)?
-    {
-        return Err(io::ErrorKind::AddrInUse.into());
-    }
+
     sockets.push(socket);
     Ok(sockets)
 }
@@ -532,8 +511,7 @@ fn bind_socket(claim: &BindClaim) -> io::Result<Socket> {
     // Ignore that transient state. SO_REUSEPORT is intentionally never enabled;
     // Windows stays exclusive below, and macOS guards overlapping address forms above.
     socket.set_reuse_address(cfg!(unix) && matches!(claim.transport, ListenerTransport::Tcp))?;
-    #[cfg(windows)]
-    set_exclusive_address_use(&socket)?;
+
     socket.bind(&SockAddr::from(claim.socket_addr()))?;
     Ok(socket)
 }
@@ -543,141 +521,7 @@ fn is_bind_conflict(error: &io::Error) -> bool {
         return true;
     }
 
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Networking::WinSock::WSAEACCES;
-
-        error.raw_os_error() == Some(WSAEACCES)
-    }
-    #[cfg(not(windows))]
     false
-}
-
-#[cfg(windows)]
-fn set_exclusive_address_use(socket: &Socket) -> io::Result<()> {
-    use std::{mem::size_of, os::windows::io::AsRawSocket as _};
-    use windows_sys::Win32::Networking::WinSock::{SO_EXCLUSIVEADDRUSE, SOCKET, SOCKET_ERROR, SOL_SOCKET, setsockopt};
-
-    let enabled = 1i32;
-    // Rust exposes `RawSocket` as `u64` for compatibility, while WinSock's
-    // `SOCKET` is pointer-sized. The value originated from WinSock, so it fits
-    // in `SOCKET` on every Windows target.
-    let raw_socket = socket.as_raw_socket() as SOCKET;
-    // SAFETY: the socket is valid and `enabled` remains alive for the duration of the call.
-    let result = unsafe {
-        setsockopt(
-            raw_socket,
-            SOL_SOCKET,
-            SO_EXCLUSIVEADDRUSE,
-            (&raw const enabled).cast(),
-            size_of::<i32>() as i32,
-        )
-    };
-    if result == SOCKET_ERROR {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn windows_wildcard_tcp_listener_exists(address: IpAddr, port: u16) -> io::Result<bool> {
-    use windows_sys::Win32::{
-        NetworkManagement::IpHelper::{MIB_TCP6ROW_OWNER_PID, MIB_TCPROW_OWNER_PID},
-        Networking::WinSock::{AF_INET, AF_INET6},
-    };
-
-    let family = match address {
-        IpAddr::V4(_) => u32::from(AF_INET),
-        IpAddr::V6(_) => u32::from(AF_INET6),
-    };
-    let table = windows_tcp_listener_table(family)?;
-    match address {
-        IpAddr::V4(_) => Ok(windows_tcp_listener_rows::<MIB_TCPROW_OWNER_PID>(&table)?
-            .iter()
-            .any(|row| row.dwLocalAddr == 0 && windows_tcp_port(row.dwLocalPort) == port)),
-        IpAddr::V6(_) => Ok(windows_tcp_listener_rows::<MIB_TCP6ROW_OWNER_PID>(&table)?
-            .iter()
-            .any(|row| row.ucLocalAddr == [0; 16] && windows_tcp_port(row.dwLocalPort) == port)),
-    }
-}
-
-#[cfg(windows)]
-fn windows_tcp_listener_table(family: u32) -> io::Result<Vec<u32>> {
-    use std::{mem::size_of, ptr::null_mut};
-    use windows_sys::Win32::{
-        Foundation::ERROR_INSUFFICIENT_BUFFER,
-        NetworkManagement::IpHelper::{GetExtendedTcpTable, TCP_TABLE_OWNER_PID_LISTENER},
-    };
-
-    let mut byte_count = 0;
-    // SAFETY: a null table is the documented size-query form; `byte_count` is writable.
-    let status = unsafe {
-        GetExtendedTcpTable(
-            null_mut(),
-            &raw mut byte_count,
-            0,
-            family,
-            TCP_TABLE_OWNER_PID_LISTENER,
-            0,
-        )
-    };
-    if status != ERROR_INSUFFICIENT_BUFFER {
-        return Err(io::Error::from_raw_os_error(status.cast_signed()));
-    }
-
-    loop {
-        let word_count = (byte_count as usize).div_ceil(size_of::<u32>());
-        let mut table = vec![0u32; word_count];
-        // SAFETY: `table` has at least `byte_count` writable bytes and the API updates
-        // `byte_count` when the listener table grows between calls.
-        let status = unsafe {
-            GetExtendedTcpTable(
-                table.as_mut_ptr().cast(),
-                &raw mut byte_count,
-                0,
-                family,
-                TCP_TABLE_OWNER_PID_LISTENER,
-                0,
-            )
-        };
-        match status {
-            0 => return Ok(table),
-            ERROR_INSUFFICIENT_BUFFER => {}
-            error => return Err(io::Error::from_raw_os_error(error.cast_signed())),
-        }
-    }
-}
-
-#[cfg(windows)]
-fn windows_tcp_listener_rows<Row>(table: &[u32]) -> io::Result<&[Row]> {
-    use std::mem::{align_of, size_of, size_of_val};
-
-    let Some((&row_count, _)) = table.split_first() else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Windows returned an empty TCP listener table",
-        ));
-    };
-    let row_count = row_count as usize;
-    let required_bytes = row_count
-        .checked_mul(size_of::<Row>())
-        .and_then(|rows| size_of::<u32>().checked_add(rows))
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Windows TCP listener table is too large"))?;
-    if required_bytes > size_of_val(table) || align_of::<Row>() > align_of::<u32>() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Windows returned a malformed TCP listener table",
-        ));
-    }
-
-    // SAFETY: the size and alignment checks above cover `row_count` complete rows;
-    // the API places them immediately after its u32 entry count.
-    Ok(unsafe { std::slice::from_raw_parts(table.as_ptr().add(1).cast(), row_count) })
-}
-
-#[cfg(windows)]
-const fn windows_tcp_port(raw_port: u32) -> u16 {
-    u16::from_be(raw_port as u16)
 }
 
 const fn conflict_outcome(claim: &BindClaim) -> ListenerProbeOutcome {
@@ -702,10 +546,10 @@ mod tests {
     };
     use serde_json::json;
     use serde_yaml_ng::Mapping;
-    #[cfg(unix)]
+
     use socket2::{Domain, Protocol, SockAddr, Socket, Type};
     use std::net::{Ipv4Addr, TcpListener, UdpSocket};
-    #[cfg(unix)]
+
     use std::{
         io::Read as _,
         net::{Shutdown, SocketAddrV4, TcpStream},
@@ -716,7 +560,7 @@ mod tests {
     }
 
     /// The wildcard claim only reaches conflicts through the enumerated guards.
-    #[cfg(target_os = "macos")]
+
     #[test]
     fn probe_reports_interface_tcp_listener_conflicts_for_the_wildcard_address() -> anyhow::Result<()> {
         use network_interface::{NetworkInterface, NetworkInterfaceConfig as _};
@@ -786,7 +630,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
     #[test]
     fn probe_reuses_port_held_only_by_a_stale_tcp_connection() -> anyhow::Result<()> {
         let listener = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
@@ -944,8 +787,7 @@ mod tests {
             "mixedPort": 7897,
             "socks": { "enabled": false, "port": 7898 },
             "http": { "enabled": false, "port": 7899 },
-            "redir": { "enabled": false, "port": 7895 },
-            "tproxy": { "enabled": false, "port": 7896 }
+            "redir": { "enabled": false, "port": 7895 }
         }))?;
         assert_eq!(settings.mixed_port, 7897);
         Ok(())

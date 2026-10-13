@@ -24,11 +24,8 @@ import { useWindowDecorations } from '@/hooks/use-window'
 import { copyIconFile, getAppDir } from '@/services/cmds'
 import { mutate } from '@/services/mutate'
 import { showNotice } from '@/services/notice-service'
-import getSystem from '@/utils/get-system'
 
 import { GuardState } from './guard-state'
-
-const OS = getSystem()
 
 const clampHoverDelay = (value: number) => {
   if (!Number.isFinite(value)) {
@@ -378,7 +375,7 @@ export const LayoutViewer = forwardRef<DialogRef>((_, ref) => {
           </GuardState>
         </Item>
 
-        {OS === 'macos' && (
+        {
           <Item>
             <ListItemText
               primary={t('settings.components.verge.layout.fields.trayIcon')}
@@ -405,8 +402,8 @@ export const LayoutViewer = forwardRef<DialogRef>((_, ref) => {
               </Select>
             </GuardState>
           </Item>
-        )}
-        {OS === 'macos' && (
+        }
+        {
           <Item>
             <ListItemText
               primary={t(
@@ -424,7 +421,7 @@ export const LayoutViewer = forwardRef<DialogRef>((_, ref) => {
               <Switch edge="end" />
             </GuardState>
           </Item>
-        )}
+        }
         {/* {OS === "macos" && (
           <Item>
             <ListItemText primary={t("settings.components.verge.layout.fields.enableTrayIcon")} />

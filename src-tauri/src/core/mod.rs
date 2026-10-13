@@ -6,7 +6,7 @@ pub mod lightweight;
 pub mod listener;
 pub mod logger;
 pub mod manager;
-#[cfg(target_os = "macos")]
+
 pub mod network_watch;
 pub mod notify;
 pub(crate) mod owner_identity;
@@ -20,7 +20,6 @@ pub mod timer;
 pub mod tray;
 pub mod updater;
 pub mod validate;
-pub mod win_uwp;
 
 pub use self::{manager::CoreManager, timer::Timer, updater::SilentUpdater};
 pub use notify::{handle, notification};

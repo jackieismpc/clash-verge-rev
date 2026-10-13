@@ -55,7 +55,7 @@ pub async fn restart_app() {
         handle::Handle::global().clear_is_exiting();
         // A failed stop may still have marked the core stopped, and exit cleanup skipped the DNS restore.
         // A core that kept running keeps its DNS, whatever an unapplied config draft says.
-        #[cfg(target_os = "macos")]
+
         {
             let manager = CoreManager::global();
             let _lifecycle = manager.lifecycle_lock.lock().await;

@@ -28,8 +28,6 @@ macro_rules! select_field {
     };
     ($effects:ident, $field:ident, Tun) => {
         select_field!($effects, $field, [ClashConfig, TrayMenu, TrayTooltip, TrayIcon]);
-        #[cfg(target_os = "linux")]
-        if *$field == Some(true) { $effects.insert(Effect::RestartCore); }
     };
 }
 
@@ -60,7 +58,6 @@ verge_registry! {
     enable_group_icon => NoEffect;
     pause_render_traffic_stats_on_blur => NoEffect;
     common_tray_icon => [TrayIcon];
-    #[cfg(target_os = "macos")]
     tray_icon => [TrayIcon];
     menu_icon => NoEffect;
     menu_order => NoEffect;
@@ -102,14 +99,8 @@ verge_registry! {
     enable_auto_backup_schedule => NoEffect;
     auto_backup_interval_hours => NoEffect;
     auto_backup_on_change => NoEffect;
-    #[cfg(not(target_os = "windows"))]
     verge_redir_port => [RestartCore];
-    #[cfg(not(target_os = "windows"))]
     verge_redir_enabled => [RestartCore];
-    #[cfg(target_os = "linux")]
-    verge_tproxy_port => [RestartCore];
-    #[cfg(target_os = "linux")]
-    verge_tproxy_enabled => [RestartCore];
     verge_mixed_port => [RestartCore];
     verge_socks_port => [RestartCore];
     verge_socks_enabled => [RestartCore];
@@ -118,7 +109,6 @@ verge_registry! {
     webdav_url => NoEffect;
     webdav_username => NoEffect;
     webdav_password => NoEffect;
-    #[cfg(target_os = "macos")]
     enable_tray_speed => [TrayIcon];
     tray_proxy_groups_display_mode => [TrayMenu];
     tray_inline_outbound_modes => [TrayMenu];
@@ -222,20 +212,7 @@ mod tests {
         }
 
         let tun = verge_patch(|p| p.enable_tun_mode = Some(true));
-        #[cfg(target_os = "linux")]
-        assert_eq!(
-            verge_effects(&tun),
-            [
-                Effect::RestartCore,
-                Effect::ClashConfig,
-                Effect::TrayIcon,
-                Effect::TrayMenu,
-                Effect::TrayTooltip,
-            ]
-            .into_iter()
-            .collect::<Effects>()
-        );
-        #[cfg(not(target_os = "linux"))]
+
         assert_eq!(
             verge_effects(&tun),
             [

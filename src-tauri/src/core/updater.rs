@@ -203,16 +203,6 @@ fn version_lte(a: &str, b: &str) -> bool {
     true // equal
 }
 
-/// Maps UI language to one of the three NSIS translations, defaulting to English.
-#[cfg(target_os = "windows")]
-fn nsis_language_id(app_language: &str) -> &'static str {
-    match app_language {
-        "zh" | "zhtw" => "2052", // SimpChinese
-        "ru" => "1049",          // Russian
-        _ => "1033",             // English
-    }
-}
-
 /// Same wire shape as the updater plugin's JS `DownloadEvent`.
 #[derive(Clone, Serialize, specta::Type)]
 #[serde(tag = "event", content = "data")]
@@ -315,12 +305,7 @@ impl SilentUpdater {
     /// see `packages/windows/installer.nsi`.
     async fn check(app_handle: &tauri::AppHandle) -> Result<Option<Update>> {
         let updater_builder = app_handle.updater_builder();
-        #[cfg(target_os = "windows")]
-        let updater_builder = {
-            let verge_lang = Config::verge().await.latest_arc().language.clone();
-            let lang_id = nsis_language_id(&clash_verge_i18n::current_language(verge_lang.as_deref()));
-            updater_builder.installer_arg(format!("/LANG={lang_id}"))
-        };
+
         Ok(updater_builder.build()?.check().await?)
     }
 
@@ -330,7 +315,7 @@ impl SilentUpdater {
 
     /// Installs a newer cached update before normal startup, if the user confirms.
     pub async fn try_install_on_startup(&self, app_handle: &tauri::AppHandle) -> bool {
-        if !Config::verge().await.latest_arc().auto_check_update.unwrap_or(true) {
+        if !Config::verge().await.latest_arc().auto_check_update.unwrap_or(false) {
             Self::delete_cache();
             return false;
         }
@@ -597,7 +582,7 @@ impl SilentUpdater {
         // Registered before reading the switch, so `discard_pending` either cancels it or ran first.
         let cancel = CancellationToken::new();
         *self.background_cancel.lock() = Some(cancel.clone());
-        let auto_check = Config::verge().await.latest_arc().auto_check_update.unwrap_or(true);
+        let auto_check = Config::verge().await.latest_arc().auto_check_update.unwrap_or(false);
         if !auto_check {
             logging!(debug, Type::System, "Silent update skipped: auto_check_update is false");
             return Ok(());
@@ -660,7 +645,7 @@ impl SilentUpdater {
 
         // Serialized with `discard_pending` in the verge patch, which holds the same lock.
         let _config_write = Config::lock_config_write().await;
-        if cancel.is_cancelled() || !Config::verge().await.latest_arc().auto_check_update.unwrap_or(true) {
+        if cancel.is_cancelled() || !Config::verge().await.latest_arc().auto_check_update.unwrap_or(false) {
             logging!(
                 info,
                 Type::System,

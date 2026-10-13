@@ -24,6 +24,8 @@ try {
       '--bin',
       'frontend-contract',
       '--locked',
+      '--features',
+      'clippy',
       '-q',
       ...(check ? ['--', output] : []),
     ],

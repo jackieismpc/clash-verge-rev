@@ -26,61 +26,7 @@ pub(super) fn explain_core_occupancy(error: anyhow::Error) -> anyhow::Error {
     }
 }
 
-#[cfg(target_os = "windows")]
-fn sidecar_config_without_tun(yaml: &str) -> Result<std::string::String> {
-    use serde_yaml_ng::{Mapping, Value};
-
-    let mut config: Mapping = serde_yaml_ng::from_str(yaml)?;
-    let tun = config
-        .entry(Value::from("tun"))
-        .or_insert_with(|| Value::Mapping(Mapping::new()));
-    if !tun.is_mapping() {
-        *tun = Value::Mapping(Mapping::new());
-    }
-    tun.as_mapping_mut()
-        .context("invalid Sidecar TUN configuration")?
-        .insert(Value::from("enable"), Value::Bool(false));
-    Ok(serde_yaml_ng::to_string(&config)?)
-}
-
 const SIDECAR_READINESS_ATTEMPTS: usize = 30;
-
-#[cfg(target_os = "windows")]
-async fn retry_service_start<Start, StartFuture>(
-    attempts: usize,
-    retry_delay: std::time::Duration,
-    mut start: Start,
-) -> Result<()>
-where
-    Start: FnMut() -> StartFuture + Send,
-    StartFuture: std::future::Future<Output = Result<()>> + Send,
-{
-    let attempts = NonZeroUsize::new(attempts).ok_or_else(|| anyhow::anyhow!("service start failed"))?;
-    retry(RetryPolicy::fixed(attempts, retry_delay), |attempt| {
-        // The Windows Service IPC future would otherwise inflate every enclosing lifecycle future.
-        let future = Box::pin(start());
-        async move {
-            future.await.map_err(|error| {
-                logging!(
-                    warn,
-                    Type::Core,
-                    "service start attempt {}/{} failed: {error:#}",
-                    attempt + 1,
-                    attempts
-                );
-                if error
-                    .downcast_ref::<service::ServiceStartRefusal>()
-                    .is_some_and(|refusal| service::StageRequest::is_about_the_bundle(refusal.code))
-                {
-                    RetryError::Stop(error)
-                } else {
-                    RetryError::Retry(error)
-                }
-            })
-        }
-    })
-    .await
-}
 
 impl CoreManager {
     /// Restores profile selections before callers enable the system proxy.
@@ -134,21 +80,6 @@ fn should_clear_terminated_sidecar(running_mode: &RunningMode, current_pid: Opti
     matches!(running_mode, RunningMode::Sidecar) && current_pid == Some(terminated_pid)
 }
 
-#[cfg(target_os = "windows")]
-use {
-    std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle},
-    windows_sys::Win32::{
-        Foundation::HANDLE,
-        System::{
-            JobObjects::{
-                AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject,
-            },
-            Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_SET_QUOTA, PROCESS_TERMINATE},
-        },
-    },
-};
-
 impl CoreManager {
     pub async fn get_clash_logs(&self) -> Result<Vec<String>> {
         match *self.get_running_mode() {
@@ -171,23 +102,14 @@ impl CoreManager {
         handle::Handle::app_handle()
             .mihomo()
             .update_socket_path(dirs::path_to_str(&sidecar_ipc)?.to_owned())?;
-        #[cfg(target_os = "windows")]
-        let config_file = if crate::core::runstate::RUN_STATE.state().is_admin {
-            Config::generate_file().await?
-        } else {
-            // Reconciliation persists the preference later; the first spawn must already have TUN off.
-            let yaml = sidecar_config_without_tun(&Config::runtime_config_yaml().await?)?;
-            Config::write_runtime_file(&yaml).await?
-        };
-        #[cfg(not(target_os = "windows"))]
+
         let config_file = Config::generate_file().await?;
         let app_handle = handle::Handle::app_handle();
         let clash_core = Config::verge().await.latest_arc().get_valid_clash_core();
         let config_dir = dirs::app_home_dir()?;
-        #[cfg(unix)]
+
         discard_unwritable_core_cache(&config_dir);
 
-        #[cfg(unix)]
         let previous_mask = unsafe { tauri_plugin_clash_verge_sysinfo::libc::umask(0o077) };
         let command = app_handle
             .shell()
@@ -198,18 +120,10 @@ impl CoreManager {
             dirs::path_to_str(&config_dir)?,
             "-f",
             dirs::path_to_str(&config_file)?,
-            if cfg!(windows) {
-                "-ext-ctl-pipe"
-            } else {
-                "-ext-ctl-unix"
-            },
+            "-ext-ctl-unix",
             dirs::path_to_str(&sidecar_ipc)?,
         ]);
-        #[cfg(windows)]
-        let command = command.env(
-            "LISTEN_NAMEDPIPE_SDDL",
-            crate::core::owner_identity::current_user_pipe_sddl()?,
-        );
+
         let (mut rx, child) = command.spawn().map_err(|error| {
             anyhow::anyhow!(
                 "failed to start sidecar core {clash_core:?} with config {} and data directory {}: {error:#}",
@@ -219,31 +133,8 @@ impl CoreManager {
         })?;
         let (terminated, termination) = tokio::sync::oneshot::channel();
         *self.sidecar_exit.lock().await = Some(execution.release_after_exit(child.pid(), termination));
-        #[cfg(target_os = "windows")]
-        let job = {
-            match create_and_assign_sidecar_job(child.pid()) {
-                Ok(job) => job,
-                Err(job_error) => {
-                    let pid = child.pid();
 
-                    let error = match child.kill() {
-                        Ok(()) => job_error,
-                        Err(kill_error) => anyhow::anyhow!(
-                            "failed to configure Job Object for sidecar PID {pid}: \
-                            {job_error:#}; failed to terminate child: {kill_error:#}"
-                        ),
-                    };
-
-                    logging!(error, Type::Core, "Failed to start sidecar: {error:#}");
-                    return Err(error);
-                }
-            }
-        };
-
-        #[cfg(unix)]
-        unsafe {
-            tauri_plugin_clash_verge_sysinfo::libc::umask(previous_mask)
-        };
+        unsafe { tauri_plugin_clash_verge_sysinfo::libc::umask(previous_mask) };
 
         let pid = child.pid();
         tracing::Span::current().record("pid", pid);
@@ -302,8 +193,6 @@ impl CoreManager {
             };
         }
 
-        #[cfg(target_os = "windows")]
-        self.set_job_handle(Some(job));
         self.set_running_child_sidecar(child);
         self.core_started(RunningMode::Sidecar);
         self.restore_selected_nodes().await;
@@ -316,14 +205,6 @@ impl CoreManager {
     pub(super) async fn stop_core_by_sidecar_unprepared(&self) -> Result<()> {
         if let Some(child) = self.take_child_sidecar() {
             let pid = child.pid();
-
-            #[cfg(target_os = "windows")]
-            {
-                // Setting the job handle to None clears the stored handle and
-                // closes the previous Windows job handle in `set_job_handle`.
-                self.set_job_handle(None);
-                let _ = pid;
-            }
 
             if let Err(error) = child.kill() {
                 logging!(warn, Type::Core, "failed to terminate sidecar PID {pid}: {error:#}");
@@ -361,21 +242,7 @@ impl CoreManager {
     #[tracing::instrument(skip_all, level = "info", fields(config_file = %config_file.display()))]
     pub(super) async fn start_core_by_service_with_config(&self, config_file: &Path) -> Result<()> {
         // 交接时等待 sidecar 释放 ext-controller 通道。
-        #[cfg(target_os = "windows")]
-        {
-            use crate::constants::timing;
-            retry_service_start(timing::SERVICE_START_RETRIES, timing::SERVICE_START_RETRY_DELAY, || {
-                service::run_core_by_service(config_file)
-            })
-            .await?;
-            self.mark_core_ready();
-            self.core_started(RunningMode::Service);
-            self.restore_selected_nodes().await;
-            service::request_runtime_provider_sync(timing::RUNTIME_PROVIDER_SYNC_DELAY);
-            Ok(())
-        }
 
-        #[cfg(not(target_os = "windows"))]
         {
             service::run_core_by_service(config_file).await?;
             self.mark_core_ready();
@@ -399,11 +266,10 @@ impl CoreManager {
         }
 
         let _ = self.take_child_sidecar();
-        #[cfg(target_os = "windows")]
-        self.set_job_handle(None);
+
         proxy_control::stop_guard().await;
         self.core_stopped();
-        #[cfg(target_os = "macos")]
+
         crate::utils::resolve::dns::sync_public_dns().await;
     }
 }
@@ -417,7 +283,6 @@ impl CoreManager {
 /// repairs it either, because the service-side cleanup only runs inside the service. Removing it
 /// lets the core recreate the cache under the current user; the fake-ip leases and frozen
 /// selections that go with it could not be updated anyway.
-#[cfg(unix)]
 fn discard_unwritable_core_cache(config_dir: &Path) {
     let cache = config_dir.join("cache.db");
     // Appending neither creates nor truncates, so this only asks whether a write would be allowed.
@@ -593,112 +458,5 @@ mod readiness_tests {
 
         assert_eq!(*manager.get_running_mode(), RunningMode::Service);
         assert_eq!(manager.current_core_readiness_generation(), None);
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn create_and_assign_sidecar_job(child_pid: u32) -> Result<OwnedHandle> {
-    unsafe {
-        let raw_job: HANDLE = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-        if raw_job.is_null() {
-            return Err(last_win32_error("CreateJobObjectW failed"));
-        }
-        let job = OwnedHandle::from_raw_handle(raw_job);
-        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-
-        let set_info_result = SetInformationJobObject(
-            job.as_raw_handle() as HANDLE,
-            JobObjectExtendedLimitInformation,
-            &mut info as *mut _ as *mut _,
-            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-        );
-        if set_info_result == 0 {
-            return Err(last_win32_error("SetInformationJobObject failed"));
-        }
-
-        let raw_process_handle = OpenProcess(
-            PROCESS_SET_QUOTA | PROCESS_TERMINATE | PROCESS_QUERY_INFORMATION,
-            0,
-            child_pid,
-        );
-        if raw_process_handle.is_null() {
-            return Err(last_win32_error("OpenProcess failed"));
-        }
-        let process_handle = OwnedHandle::from_raw_handle(raw_process_handle);
-
-        let assign_result = AssignProcessToJobObject(job.as_raw_handle(), process_handle.as_raw_handle());
-        if assign_result == 0 {
-            return Err(last_win32_error("AssignProcessToJobObject failed"));
-        }
-
-        Ok(job)
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn last_win32_error(operation: &'static str) -> anyhow::Error {
-    anyhow::Error::new(std::io::Error::last_os_error()).context(operation)
-}
-
-#[cfg(all(test, target_os = "windows"))]
-mod tests {
-    use super::create_and_assign_sidecar_job;
-    use anyhow::Result;
-    use std::{
-        process::{Child, Command, Stdio},
-        thread::sleep,
-        time::{Duration, Instant},
-    };
-
-    // Use ping directly as a long-lived process without a cmd.exe intermediary.
-    fn spawn_long_lived() -> Result<Child> {
-        let child = Command::new("ping")
-            .args(["-n", "999", "127.0.0.1"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
-        Ok(child)
-    }
-
-    fn wait_until_exited(child: &mut Child, timeout: Duration) -> Result<bool> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            if child.try_wait()?.is_some() {
-                return Ok(true);
-            }
-            if Instant::now() >= deadline {
-                return Ok(false);
-            }
-            sleep(Duration::from_millis(50));
-        }
-    }
-
-    #[test]
-    fn job_kills_child_on_handle_drop() -> Result<()> {
-        let mut child = spawn_long_lived()?;
-
-        let job = create_and_assign_sidecar_job(child.id())?;
-
-        assert!(
-            child.try_wait()?.is_none(),
-            "child should still be running after being assigned to the job"
-        );
-
-        drop(job);
-
-        assert!(
-            wait_until_exited(&mut child, Duration::from_secs(5))?,
-            "child should be terminated after the job handle is dropped"
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn returns_err_for_invalid_pid() {
-        // Windows PIDs are multiples of four; this one is effectively impossible.
-        let result = create_and_assign_sidecar_job(0xFFFF_FFFC);
-        assert!(result.is_err(), "expected Err for a non-existent PID");
     }
 }

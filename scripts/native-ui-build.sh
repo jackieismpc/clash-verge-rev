@@ -7,7 +7,7 @@ export TMPDIR="$task_work/tmp"
 export CLANG_MODULE_CACHE_PATH="$task_work/cache/clang"
 export SWIFT_MODULECACHE_PATH="$task_work/cache/swift"
 "$project_root/scripts/native-core-build.sh" build --offline
-node "$project_root/scripts/native-core-assets.mjs" --offline
+"$project_root/scripts/native-core-assets.sh" --offline
 /usr/bin/swift build --package-path "$project_root/native" \
   --build-system native --scratch-path "$task_work/build-native" --cache-path "$task_work/cache" \
   --config-path "$task_work/config" --security-path "$task_work/security" "$@"

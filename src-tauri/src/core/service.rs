@@ -60,12 +60,6 @@ pub(crate) fn is_not_auto_started(reason: &str) -> bool {
     reason.contains(SERVICE_NOT_AUTO_STARTED)
 }
 
-#[cfg(target_os = "windows")]
-pub(crate) fn notify_service_fallback(reason: &str) {
-    *PENDING_SERVICE_FALLBACK_NOTICE.lock() = Some(reason.to_owned());
-    Handle::notice(NoticeStatus::ServiceCoreSidecarFallback, "");
-}
-
 pub(crate) fn take_service_fallback_notice() -> Option<ServiceFallbackNotice> {
     let reason = PENDING_SERVICE_FALLBACK_NOTICE.lock().take()?;
     Some(if reason.starts_with(CORE_REJECTED_PREFIX) {
@@ -228,7 +222,6 @@ impl ServiceStatus {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn path_entry_exists_without_follow(path: &Path) -> std::io::Result<bool> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
@@ -237,7 +230,6 @@ fn path_entry_exists_without_follow(path: &Path) -> std::io::Result<bool> {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn macos_service_install_markers() -> Vec<String> {
     vec![
         format!(
@@ -255,7 +247,6 @@ fn macos_service_install_markers() -> Vec<String> {
     ]
 }
 
-#[cfg(target_os = "macos")]
 fn macos_service_install_marker_exists() -> std::io::Result<bool> {
     for marker in macos_service_install_markers() {
         if path_entry_exists_without_follow(Path::new(&marker))? {
@@ -265,80 +256,6 @@ fn macos_service_install_marker_exists() -> std::io::Result<bool> {
     Ok(false)
 }
 
-#[cfg(windows)]
-fn open_registered_service() -> Result<Option<windows_service::service::Service>> {
-    use windows_service::{
-        Error as WindowsServiceError,
-        service::ServiceAccess,
-        service_manager::{ServiceManager as WindowsServiceManager, ServiceManagerAccess},
-    };
-
-    const ERROR_SERVICE_DOES_NOT_EXIST: i32 = 1060;
-    let manager = WindowsServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
-    match manager.open_service(
-        clash_verge_service_ipc::WINDOWS_SERVICE_NAME,
-        ServiceAccess::QUERY_STATUS | ServiceAccess::QUERY_CONFIG,
-    ) {
-        Ok(service) => Ok(Some(service)),
-        Err(WindowsServiceError::Winapi(error)) if error.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST) => {
-            Ok(None)
-        }
-        Err(error) => Err(error).context("failed to inspect Windows service registration"),
-    }
-}
-
-#[cfg(windows)]
-pub(crate) fn trusted_service_evidence() -> Result<bool> {
-    Ok(open_registered_service()?.is_some())
-}
-
-/// Why IPC cannot succeed until the service is started again, if it cannot. A starting service,
-/// or an AutoStart one the SCM has yet to start this boot, is left to the IPC retries.
-#[cfg(windows)]
-pub(crate) fn service_stop_reason() -> Result<Option<&'static str>> {
-    use windows_service::service::{ServiceExitCode, ServiceStartType, ServiceState};
-
-    const ERROR_SERVICE_NEVER_STARTED: u32 = 1077;
-    const NOT_RUNNING: &str = "the Windows service is not running";
-    let Some(service) = open_registered_service()? else {
-        return Ok(Some(NOT_RUNNING));
-    };
-    let status = service
-        .query_status()
-        .context("failed to query Windows service status")?;
-    if status.current_state != ServiceState::Stopped {
-        return Ok(None);
-    }
-    // The development channel registers an on-demand start.
-    if !cfg!(feature = "verge-dev")
-        && service
-            .query_config()
-            .context("failed to query Windows service configuration")?
-            .start_type
-            != ServiceStartType::AutoStart
-    {
-        return Ok(Some(SERVICE_NOT_AUTO_STARTED));
-    }
-    Ok((status.exit_code != ServiceExitCode::Win32(ERROR_SERVICE_NEVER_STARTED)).then_some(NOT_RUNNING))
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn trusted_service_evidence() -> Result<bool> {
-    let unit = format!("{}.service", clash_verge_service_ipc::SERVICE_SLUG);
-    let output = StdCommand::new("systemctl")
-        .args(["show", "--property=LoadState", "--value", &unit])
-        .output()
-        .context("failed to inspect systemd service registration")?;
-    if !output.status.success() {
-        bail!(
-            "systemd service registration probe failed with status {}",
-            output.status
-        );
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim() != "not-found")
-}
-
-#[cfg(target_os = "macos")]
 pub(crate) fn trusted_service_evidence() -> Result<bool> {
     macos_service_install_marker_exists().context("failed to inspect launchd service registration")
 }
@@ -481,7 +398,6 @@ where
             )
         })?;
 
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
 
@@ -497,8 +413,6 @@ where
                 )
             })?;
         }
-        #[cfg(not(unix))]
-        bail!("development Service core staging requires Unix executable permissions");
 
         temporary_file
             .sync_all()
@@ -526,7 +440,6 @@ where
     Ok(final_path)
 }
 
-#[cfg(target_os = "macos")]
 #[cfg_attr(not(feature = "verge-dev"), allow(clippy::unnecessary_wraps))]
 fn macos_service_tool_path(source: &Path) -> Result<PathBuf> {
     #[cfg(feature = "verge-dev")]
@@ -562,12 +475,10 @@ fn service_core_path(clash_core: &str, bin_ext: &str) -> Result<PathBuf> {
     Ok(sibling)
 }
 
-#[cfg(target_os = "macos")]
 fn escape_osascript_double_quoted_string(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-#[cfg(target_os = "macos")]
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
@@ -592,99 +503,6 @@ fn packaged_service_tool_path(file_name: &str, packaged_path: impl FnOnce() -> R
     }
 }
 
-#[cfg(target_os = "windows")]
-fn uninstall_service() -> Result<()> {
-    logging!(info, Type::Service, "uninstall service");
-
-    use deelevate::{PrivilegeLevel, Token};
-    use runas::Command as RunasCommand;
-    use std::os::windows::process::CommandExt as _;
-
-    let uninstall_path = packaged_service_tool_path("clash-verge-service-uninstall.exe", || {
-        Ok(dirs::service_path()?.with_file_name("clash-verge-service-uninstall.exe"))
-    })?;
-
-    if !uninstall_path.exists() {
-        bail!(format!("uninstaller not found: {uninstall_path:?}"));
-    }
-
-    let token = Token::with_current_process()?;
-    let level = token.privilege_level()?;
-    let status = match level {
-        PrivilegeLevel::NotPrivileged => RunasCommand::new(uninstall_path).show(false).status()?,
-        _ => StdCommand::new(uninstall_path).creation_flags(0x08000000).status()?,
-    };
-
-    if !status.success() {
-        bail!(
-            "failed to uninstall service with status {}",
-            status.code().unwrap_or(-1)
-        );
-    }
-
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn uninstall_service() -> Result<()> {
-    logging!(info, Type::Service, "uninstall service");
-
-    let uninstall_path = packaged_service_tool_path("clash-verge-service-uninstall", || {
-        Ok(tauri::utils::platform::current_exe()?.with_file_name("clash-verge-service-uninstall"))
-    })?;
-
-    if !uninstall_path.exists() {
-        bail!(format!("uninstaller not found: {uninstall_path:?}"));
-    }
-
-    let elevator = crate::utils::help::linux_elevator();
-    let status = if linux_running_as_root() {
-        StdCommand::new(&uninstall_path).status()?
-    } else {
-        let result = StdCommand::new(&elevator)
-            .arg("--disable-internal-agent")
-            .arg(&uninstall_path)
-            .status()?;
-
-        // 如果 pkexec 执行失败，回退到 sudo
-        if !result.success() && elevator.contains("pkexec") {
-            logging!(
-                warn,
-                Type::Service,
-                "pkexec failed with code {}, falling back to sudo",
-                result.code().unwrap_or(-1)
-            );
-            StdCommand::new("sudo").arg(&uninstall_path).status()?
-        } else {
-            result
-        }
-    };
-    logging!(
-        info,
-        Type::Service,
-        "uninstall status code:{}",
-        status.code().unwrap_or(-1)
-    );
-
-    if !status.success() {
-        bail!(
-            "failed to uninstall service with status {}",
-            status.code().unwrap_or(-1)
-        );
-    }
-
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn linux_running_as_root() -> bool {
-    use crate::core::handle;
-    use tauri_plugin_clash_verge_sysinfo::is_current_app_handle_admin;
-    let app_handle = handle::Handle::app_handle();
-    is_current_app_handle_admin(app_handle)
-}
-
-#[cfg(target_os = "macos")]
 fn uninstall_service() -> Result<()> {
     logging!(info, Type::Service, "uninstall service");
 
@@ -739,16 +557,12 @@ fn install_service() -> Result<()> {
 fn invoke_service_install(cores: &[clash_verge_service_ipc::management::CoreSource], core_only: bool) -> Result<()> {
     let name = format!("clash-verge-service-install{}", std::env::consts::EXE_SUFFIX);
     let installer = packaged_service_tool_path(&name, || {
-        #[cfg(target_os = "linux")]
-        let executable = tauri::utils::platform::current_exe()?;
-        #[cfg(not(target_os = "linux"))]
         let executable = dirs::service_path()?;
         Ok(executable.with_file_name(&name))
     })?;
-    #[cfg(unix)]
+
     let gid = Some(tauri_plugin_clash_verge_sysinfo::current_gid());
-    #[cfg(windows)]
-    let gid = None;
+
     clash_verge_service_ipc::management::install(
         &installer,
         cores,
@@ -813,7 +627,7 @@ async fn collect_service_runtime_bundle(config_file: &Path) -> Result<RuntimeBun
     let clash_core = verge_config.latest_arc().get_valid_clash_core();
     drop(verge_config);
 
-    let bin_ext = if cfg!(windows) { ".exe" } else { "" };
+    let bin_ext = "";
     let bin_path = service_core_path(&clash_core, bin_ext)?;
     collect_runtime_bundle(config_file, &bin_path).await
 }
@@ -925,11 +739,7 @@ pub(super) async fn start_with_existing_service(config_file: &Path) -> Result<()
             response.code,
             err_msg
         );
-        #[cfg(target_os = "windows")]
-        if response.code == ServiceErrorCode::InvalidInstallLocation as u16 {
-            PENDING_SERVICE_REPAIR_NOTICE.store(true, Ordering::Relaxed);
-            Handle::notice(NoticeStatus::ServiceCoreRepairRequired, "");
-        }
+
         if response.code == ServiceErrorCode::AppDataRootNotOwned as u16 {
             *PENDING_SERVICE_OWNER_NOTICE.lock() = app_data_owner_command(&credentials);
             Handle::notice(NoticeStatus::ServiceCoreAppDataNotOwned, "");
@@ -1792,7 +1602,7 @@ async fn recover_after_owner_loss_while_locked(reason: OwnerRecoveryReason) {
     clear_active_service_session();
     CoreManager::global().core_stopped();
     // A displaced Service may still run TUN for its new owner, and DNS settings are system-wide.
-    #[cfg(target_os = "macos")]
+
     if policy.reset_system_proxy {
         crate::utils::resolve::dns::sync_public_dns().await;
     }
@@ -2059,12 +1869,12 @@ mod tests {
         generate_service_session_token, mark_service_unavailable_after_owner_loss, owner_recovery_policy,
         service_core_path_for, session_matches_status,
     };
-    #[cfg(unix)]
+
     use super::{service_core_path_for_with_publisher, service_tool_path_for};
     use crate::core::runstate::{FakeEnv, OwnerRecoveryReason, PendingAction, RunStateStore};
     use anyhow::bail;
     use clash_verge_service_ipc::OwnerSessionProof;
-    #[cfg(unix)]
+
     use std::cell::Cell;
     use std::{
         path::{Path, PathBuf},
@@ -2115,12 +1925,10 @@ mod tests {
         home.join("Applications/.clash-verge-rev-dev/service-core")
     }
 
-    #[cfg(unix)]
     fn service_tools_staging_directory(home: &Path) -> PathBuf {
         home.join("Applications/.clash-verge-rev-dev/service-tools")
     }
 
-    #[cfg(unix)]
     fn staging_temporary_entries(home: &Path, core_name: &str) -> anyhow::Result<Vec<PathBuf>> {
         let directory = staging_directory(home);
         if !directory.exists() {
@@ -2150,7 +1958,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
     #[test]
     fn development_service_core_uses_exact_layout_and_executable_bytes() -> anyhow::Result<()> {
         use std::os::unix::fs::PermissionsExt as _;
@@ -2173,7 +1980,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
     #[test]
     fn development_service_tool_uses_safe_layout_and_executable_bytes() -> anyhow::Result<()> {
         use std::os::unix::fs::PermissionsExt as _;
@@ -2194,7 +2000,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
     #[test]
     fn development_service_core_refresh_atomically_replaces_bytes() -> anyhow::Result<()> {
         let root = TestDirectory::new("refresh")?;
@@ -2216,7 +2021,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
     #[test]
     fn failed_development_refresh_preserves_good_core_and_cleans_temporary_entry() -> anyhow::Result<()> {
         let root = TestDirectory::new("failed-refresh")?;
@@ -2252,7 +2056,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
     #[test]
     fn development_service_core_replaces_final_symlink_without_following_it() -> anyhow::Result<()> {
         use std::os::unix::fs::symlink;
@@ -2476,7 +2279,6 @@ mod tests {
         ));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn legacy_socket_alone_is_not_install_evidence() {
         assert!(

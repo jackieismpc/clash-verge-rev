@@ -276,14 +276,11 @@ fn configured_listener_ports(clash: &IClashTemp, verge: &IVerge) -> HashSet<u16>
     }
 
     ports.extend([verge.verge_socks_port, verge.verge_port].into_iter().flatten());
-    #[cfg(not(target_os = "windows"))]
+
     if let Some(port) = verge.verge_redir_port {
         ports.insert(port);
     }
-    #[cfg(target_os = "linux")]
-    if let Some(port) = verge.verge_tproxy_port {
-        ports.insert(port);
-    }
+
     ports
 }
 
@@ -327,9 +324,7 @@ mod tests {
         assert!(ports.contains(&7898));
         assert!(ports.contains(&7899));
         assert!(ports.contains(&9097));
-        #[cfg(not(target_os = "windows"))]
+
         assert!(ports.contains(&7895));
-        #[cfg(target_os = "linux")]
-        assert!(ports.contains(&7896));
     }
 }

@@ -5,9 +5,6 @@ use std::{
 
 pub mod commands;
 
-#[cfg(windows)]
-use deelevate::{PrivilegeLevel, Token};
-#[cfg(unix)]
 pub use libc;
 use parking_lot::RwLock;
 use sysinfo::{Networks, System};
@@ -111,19 +108,10 @@ impl Platform {
 
 #[inline]
 fn is_binary_admin() -> bool {
-    #[cfg(not(windows))]
-    unsafe {
-        libc::geteuid() == 0
-    }
-    #[cfg(windows)]
-    Token::with_current_process()
-        .and_then(|token| token.privilege_level())
-        .map(|level| level != PrivilegeLevel::NotPrivileged)
-        .unwrap_or(false)
+    unsafe { libc::geteuid() == 0 }
 }
 
 #[inline]
-#[cfg(unix)]
 pub fn current_gid() -> u32 {
     unsafe { libc::getgid() }
 }

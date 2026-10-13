@@ -12,41 +12,12 @@ use crate::{
 use anyhow::{Context as _, Result};
 use chrono::{Local, TimeZone as _};
 use clash_verge_logging::Type;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+
 use std::path::Path;
 use std::{path::PathBuf, str::FromStr as _};
 use tauri_plugin_shell::ShellExt as _;
 use tokio::fs;
 use tokio::fs::DirEntry;
-
-#[cfg(target_os = "windows")]
-async fn delete_snapshot_logs(log_dir: &Path) -> Result<()> {
-    let temp_dirs = [
-        log_dir.join("temp"),
-        log_dir.join("service").join("temp"),
-        log_dir.join("sidecar").join("temp"),
-    ];
-
-    for temp_dir in temp_dirs.iter().filter(|d| d.exists()) {
-        let mut entries = fs::read_dir(temp_dir)
-            .await
-            .with_context(|| format!("failed to read log snapshot directory {}", temp_dir.display()))?;
-        while let Some(entry) = entries.next_entry().await.with_context(|| {
-            format!(
-                "failed to read next entry in log snapshot directory {}",
-                temp_dir.display()
-            )
-        })? {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("log") {
-                let _ = path.remove_if_exists().await;
-                logging!(debug, Type::Setup, "delete snapshot log file: {}", path.display());
-            }
-        }
-    }
-
-    Ok(())
-}
 
 // TODO flexi_logger 提供了最大保留天数，或许我们应该用内置删除log文件
 pub async fn delete_log() -> Result<()> {
@@ -55,11 +26,6 @@ pub async fn delete_log() -> Result<()> {
 
     if !log_dir.exists() && !service_log_dir.exists() {
         return Ok(());
-    }
-
-    #[cfg(target_os = "windows")]
-    if log_dir.exists() {
-        delete_snapshot_logs(&log_dir).await?;
     }
 
     let auto_log_clean = {
@@ -145,7 +111,6 @@ pub async fn delete_log() -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
 async fn is_logs_dir_writable(log_dir: &Path) -> bool {
     if !log_dir.is_dir() {
         logging!(warn, Type::Setup, "macOS logs path is not a directory: {:?}", log_dir);
@@ -189,7 +154,6 @@ async fn is_logs_dir_writable(log_dir: &Path) -> bool {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn available_legacy_path(parent: &Path, prefix: &str) -> Result<PathBuf> {
     let timestamp = Local::now().format("%Y%m%d%H%M%S");
     let base_name = format!("{prefix}-{timestamp}");
@@ -213,7 +177,6 @@ fn available_legacy_path(parent: &Path, prefix: &str) -> Result<PathBuf> {
     ))
 }
 
-#[cfg(target_os = "macos")]
 async fn migrate_legacy_macos_service_logs(log_dir: &Path) -> Result<()> {
     let legacy_service_dir = log_dir.join("service");
     if !legacy_service_dir.exists() {
@@ -288,7 +251,6 @@ pub async fn migrate_short_update_intervals() -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
 async fn migrate_legacy_macos_logs() -> Result<()> {
     let log_dir = dirs::app_logs_dir()?;
 
@@ -487,7 +449,6 @@ async fn initialize_config_files() -> Result<()> {
 
 /// Initializes configuration required before Tauri setup.
 pub async fn init_config() -> Result<()> {
-    #[cfg(target_os = "macos")]
     migrate_legacy_macos_logs().await?;
 
     ensure_directories().await?;
@@ -546,55 +507,9 @@ pub async fn init_resources() -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
-pub fn init_scheme() -> Result<()> {
-    use tauri::utils::platform::current_exe;
-    use winreg::{RegKey, enums::HKEY_CURRENT_USER};
-
-    let app_exe = current_exe()?;
-    let app_exe = dunce::canonicalize(app_exe)?;
-    let app_exe = app_exe.to_string_lossy().into_owned();
-
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let (clash, _) = hkcu.create_subkey("Software\\Classes\\Clash")?;
-    clash.set_value("", &"Clash Verge")?;
-    clash.set_value("URL Protocol", &"Clash Verge URL Scheme Protocol")?;
-    let (default_icon, _) = hkcu.create_subkey("Software\\Classes\\Clash\\DefaultIcon")?;
-    default_icon.set_value("", &app_exe)?;
-    let (command, _) = hkcu.create_subkey("Software\\Classes\\Clash\\Shell\\Open\\Command")?;
-    command.set_value("", &format!("{app_exe} \"%1\""))?;
-
-    Ok(())
-}
-#[cfg(target_os = "linux")]
-pub fn init_scheme() -> Result<()> {
-    const DESKTOP_FILE: &str = "clash-verge.desktop";
-
-    for scheme in DEEP_LINK_SCHEMES {
-        let handler = format!("x-scheme-handler/{scheme}");
-        let output = std::process::Command::new("xdg-mime")
-            .arg("default")
-            .arg(DESKTOP_FILE)
-            .arg(&handler)
-            .output()?;
-        if !output.status.success() {
-            return Err(anyhow::anyhow!(
-                "failed to set {handler}, {}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
-        }
-    }
-
-    crate::utils::linux::mime::ensure_mimeapps_entries(DESKTOP_FILE, DEEP_LINK_SCHEMES)?;
-    Ok(())
-}
-#[cfg(target_os = "macos")]
 pub const fn init_scheme() -> Result<()> {
     Ok(())
 }
-
-#[cfg(target_os = "linux")]
-const DEEP_LINK_SCHEMES: &[&str] = &["clash", "clash-verge"];
 
 pub async fn startup_script() -> Result<()> {
     let app_handle = handle::Handle::app_handle();

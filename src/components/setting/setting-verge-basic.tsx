@@ -11,7 +11,6 @@ import { copyClashEnv } from '@/services/cmds'
 import { supportedLanguages } from '@/services/i18n'
 import { mutate } from '@/services/mutate'
 import { showNotice } from '@/services/notice-service'
-import getSystem from '@/utils/get-system'
 
 import { BackupViewer } from './mods/backup-viewer'
 import { ConfigViewer } from './mods/config-viewer'
@@ -27,8 +26,6 @@ import { UpdateViewer } from './mods/update-viewer'
 interface Props {
   onError?: (err: Error) => void
 }
-
-const OS = getSystem()
 
 const languageOptions = supportedLanguages.map((code) => {
   const labels: { [key: string]: string } = {
@@ -131,7 +128,7 @@ const SettingVergeBasic = ({ onError }: Props) => {
         </GuardState>
       </SettingItem>
 
-      {OS !== 'linux' && (
+      {
         <SettingItem
           label={t('settings.components.verge.basic.fields.trayClickEvent')}
         >
@@ -163,7 +160,7 @@ const SettingVergeBasic = ({ onError }: Props) => {
             </Select>
           </GuardState>
         </SettingItem>
-      )}
+      }
 
       <SettingItem
         label={t('settings.components.verge.basic.fields.copyEnvType')}
@@ -172,7 +169,7 @@ const SettingVergeBasic = ({ onError }: Props) => {
         }
       >
         <GuardState
-          value={env_type ?? (OS === 'windows' ? 'powershell' : 'bash')}
+          value={env_type ?? 'bash'}
           onCatch={onError}
           onFormat={(e: any) => e.target.value}
           onChange={(e) => onChangeData({ env_type: e })}

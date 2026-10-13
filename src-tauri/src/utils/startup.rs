@@ -48,7 +48,7 @@ fn append_error(path: &Path, detail: &str) -> Result<()> {
 
     let mut options = OpenOptions::new();
     options.create(true).append(true);
-    #[cfg(unix)]
+
     {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);

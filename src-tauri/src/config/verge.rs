@@ -50,7 +50,6 @@ pub struct IVerge {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub common_tray_icon: Option<bool>,
 
-    #[cfg(target_os = "macos")]
     #[serde(skip_serializing_if = "Option::is_none")]
     #[specta(type = Option<std::string::String>)]
     pub tray_icon: Option<String>,
@@ -156,17 +155,9 @@ pub struct IVerge {
     pub auto_backup_on_change: Option<bool>,
 
     /// verge 的各种 port 用于覆盖 clash 的各种 port
-    #[cfg(not(target_os = "windows"))]
     pub verge_redir_port: Option<u16>,
 
-    #[cfg(not(target_os = "windows"))]
     pub verge_redir_enabled: Option<bool>,
-
-    #[cfg(target_os = "linux")]
-    pub verge_tproxy_port: Option<u16>,
-
-    #[cfg(target_os = "linux")]
-    pub verge_tproxy_enabled: Option<bool>,
 
     pub verge_mixed_port: Option<u16>,
 
@@ -205,7 +196,6 @@ pub struct IVerge {
     #[specta(type = Option<std::string::String>)]
     pub webdav_password: Option<String>,
 
-    #[cfg(target_os = "macos")]
     pub enable_tray_speed: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -360,16 +350,15 @@ impl IVerge {
             clash_core: Some("verge-mihomo".into()),
             language: Some(clash_verge_i18n::system_language().into()),
             theme_mode: Some("system".into()),
-            #[cfg(not(target_os = "windows"))]
+
             env_type: Some("bash".into()),
-            #[cfg(target_os = "windows")]
-            env_type: Some("powershell".into()),
+
             start_page: Some("/".into()),
             traffic_graph: Some(true),
             enable_memory_usage: Some(true),
             enable_group_icon: Some(true),
             pause_render_traffic_stats_on_blur: Some(true),
-            #[cfg(target_os = "macos")]
+
             tray_icon: Some("monochrome".into()),
             menu_icon: Some("monochrome".into()),
             notice_position: Some("top-right".into()),
@@ -385,14 +374,11 @@ impl IVerge {
             proxy_auto_config: Some(false),
             pac_file_content: Some(DEFAULT_PAC.into()),
             proxy_host: Some("127.0.0.1".into()),
-            #[cfg(not(target_os = "windows"))]
+
             verge_redir_port: Some(7895),
-            #[cfg(not(target_os = "windows"))]
+
             verge_redir_enabled: Some(false),
-            #[cfg(target_os = "linux")]
-            verge_tproxy_port: Some(7896),
-            #[cfg(target_os = "linux")]
-            verge_tproxy_enabled: Some(false),
+
             verge_mixed_port: Some(network::ports::DEFAULT_MIXED),
             verge_socks_port: Some(7898),
             verge_socks_enabled: Some(false),
@@ -403,7 +389,7 @@ impl IVerge {
             use_default_bypass: Some(true),
             proxy_guard_duration: Some(30),
             auto_close_connection: Some(true),
-            auto_check_update: Some(true),
+            auto_check_update: Some(false),
             enable_builtin_enhanced: Some(true),
             auto_log_clean: Some(2), // 1: 1天, 2: 7天, 3: 30天, 4: 90天
             enable_auto_backup_schedule: Some(false),
@@ -412,7 +398,7 @@ impl IVerge {
             webdav_url: None,
             webdav_username: None,
             webdav_password: None,
-            #[cfg(target_os = "macos")]
+
             enable_tray_speed: Some(false),
             tray_proxy_groups_display_mode: Some("default".into()),
             tray_inline_outbound_modes: Some(false),
@@ -454,7 +440,7 @@ impl IVerge {
         patch!(enable_memory_usage);
         patch!(enable_group_icon);
         patch!(pause_render_traffic_stats_on_blur);
-        #[cfg(target_os = "macos")]
+
         patch!(tray_icon);
         patch!(menu_icon);
         patch!(menu_order);
@@ -470,14 +456,11 @@ impl IVerge {
         patch!(enable_silent_start);
         patch!(enable_hover_jump_navigator);
         patch!(hover_jump_navigator_delay);
-        #[cfg(not(target_os = "windows"))]
+
         patch!(verge_redir_port);
-        #[cfg(not(target_os = "windows"))]
+
         patch!(verge_redir_enabled);
-        #[cfg(target_os = "linux")]
-        patch!(verge_tproxy_port);
-        #[cfg(target_os = "linux")]
-        patch!(verge_tproxy_enabled);
+
         patch!(verge_mixed_port);
         patch!(verge_socks_port);
         patch!(verge_socks_enabled);
@@ -515,7 +498,7 @@ impl IVerge {
         patch!(webdav_url);
         patch!(webdav_username);
         patch!(webdav_password);
-        #[cfg(target_os = "macos")]
+
         patch!(enable_tray_speed);
         patch!(tray_proxy_groups_display_mode);
         patch!(tray_inline_outbound_modes);

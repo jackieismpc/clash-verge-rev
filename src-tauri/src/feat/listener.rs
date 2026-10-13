@@ -184,10 +184,8 @@ async fn stage_proxy_ports(settings: &ProxyPortSettings) {
         draft.0.insert("mixed-port".into(), settings.mixed_port.into());
         draft.0.insert("socks-port".into(), settings.socks.port.into());
         draft.0.insert("port".into(), settings.http.port.into());
-        #[cfg(not(target_os = "windows"))]
+
         draft.0.insert("redir-port".into(), settings.redir.port.into());
-        #[cfg(target_os = "linux")]
-        draft.0.insert("tproxy-port".into(), settings.tproxy.port.into());
     });
     Config::verge().await.edit_draft(|draft| {
         draft.verge_mixed_port = Some(settings.mixed_port);
@@ -195,15 +193,10 @@ async fn stage_proxy_ports(settings: &ProxyPortSettings) {
         draft.verge_socks_enabled = Some(settings.socks.enabled);
         draft.verge_port = Some(settings.http.port);
         draft.verge_http_enabled = Some(settings.http.enabled);
-        #[cfg(not(target_os = "windows"))]
+
         {
             draft.verge_redir_port = Some(settings.redir.port);
             draft.verge_redir_enabled = Some(settings.redir.enabled);
-        }
-        #[cfg(target_os = "linux")]
-        {
-            draft.verge_tproxy_port = Some(settings.tproxy.port);
-            draft.verge_tproxy_enabled = Some(settings.tproxy.enabled);
         }
     });
 }

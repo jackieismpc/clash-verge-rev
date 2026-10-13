@@ -245,8 +245,6 @@ pub fn open_file(path: PathBuf) -> Result<()> {
 }
 
 pub fn open_latest_log(path: PathBuf) -> Result<()> {
-    #[cfg(target_os = "windows")]
-    let path = snapshot_path(&path)?;
     open_file(path)
 }
 
@@ -268,54 +266,4 @@ pub async fn open_core_latest_log() -> Result<()> {
         crate::utils::dirs::clash_latest_log()?
     };
     open_latest_log(path)
-}
-
-#[cfg(target_os = "linux")]
-pub fn linux_elevator() -> String {
-    use std::process::Command;
-    match Command::new("which").arg("pkexec").output() {
-        Ok(output) => {
-            if !output.stdout.is_empty() {
-                if let Ok(path) = std::str::from_utf8(&output.stdout) {
-                    path.trim().to_string()
-                } else {
-                    "sudo".to_string()
-                }
-            } else {
-                "sudo".to_string()
-            }
-        }
-        Err(_) => "sudo".to_string(),
-    }
-}
-
-#[cfg(target_os = "windows")]
-pub fn snapshot_path(original_path: &Path) -> Result<PathBuf> {
-    let temp_dir = original_path
-        .parent()
-        .ok_or_else(|| anyhow!("Invalid log path"))?
-        .join("temp");
-
-    std::fs::create_dir_all(&temp_dir).map_err(|error| {
-        anyhow!(
-            "failed to create log snapshot directory {}: {error}",
-            temp_dir.display()
-        )
-    })?;
-
-    let temp_path = temp_dir.join(format!(
-        "{}_{}.log",
-        original_path.file_stem().unwrap_or_default().to_string_lossy(),
-        chrono::Local::now().format("%Y-%m-%d_%H-%M-%S")
-    ));
-
-    std::fs::copy(original_path, &temp_path).map_err(|error| {
-        anyhow!(
-            "failed to copy log snapshot from {} to {}: {error}",
-            original_path.display(),
-            temp_path.display()
-        )
-    })?;
-
-    Ok(temp_path)
 }

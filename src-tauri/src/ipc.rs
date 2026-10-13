@@ -43,7 +43,6 @@ pub fn builder() -> tauri_specta::Builder<tauri::Wry> {
             cmd::get_runtime_logs,
             cmd::get_runtime_proxy_chain_config,
             cmd::update_proxy_chain_config_in_runtime,
-            cmd::invoke_uwp_tool,
             cmd::copy_clash_env,
             cmd::sync_tray_proxy_selection,
             cmd::record_selected_node,
@@ -204,7 +203,7 @@ fn platform_types() -> specta::Types {
     types
 }
 
-// These fields exist only on some hosts; IPC generation covers every desktop target.
+// Optional Mac fields share one generated contract with the legacy UI.
 #[derive(serde::Serialize, serde::Deserialize, specta::Type)]
 struct PlatformVergeFields {
     #[specta(optional)]
@@ -213,10 +212,6 @@ struct PlatformVergeFields {
     verge_redir_port: Option<u16>,
     #[specta(optional)]
     verge_redir_enabled: Option<bool>,
-    #[specta(optional)]
-    verge_tproxy_port: Option<u16>,
-    #[specta(optional)]
-    verge_tproxy_enabled: Option<bool>,
     #[specta(optional)]
     enable_tray_speed: Option<bool>,
 }

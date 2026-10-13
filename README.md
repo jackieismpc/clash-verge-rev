@@ -9,10 +9,13 @@ Rust 负责业务和运行管理，SwiftUI 负责原生界面。
 
 ## 当前实现
 
-- 产品构建目标已收窄为 `aarch64-apple-darwin`、macOS 26+。
+- 产品构建目标已收窄为 `aarch64-apple-darwin`、macOS 26+；Windows/Linux
+  源码分支、直接依赖、安装资源和构建矩阵已清理。
 - 原生 SwiftUI 视觉样板：六页导航、Liquid Glass 控件、菜单栏、概览、
   节点表、订阅管理和错误详情；已接通 Rust 与真实 mihomo。
   `--demo` 可切换到明确标记的视觉样本。
+- 原生构建只使用本机 Rust、Swift 和系统打包工具；内核下载、SHA256
+  校验与 gzip 解压由 Rust 完成，不依赖 Node/pnpm。
 - 独立 Rust 业务库：配置事务、订阅获取、独立内核生命周期、Unix
   controller、状态流、解锁检测和本地备份；不依赖 Tauri。
 - React/Tauri 保留为迁移期间的功能对照。原生系统代理、DNS/TUN、
@@ -26,7 +29,7 @@ Rust 负责业务和运行管理，SwiftUI 负责原生界面。
 生成目录。不要提交下载的二进制或运行数据。
 
 ```sh
-node scripts/native-core-assets.mjs
+scripts/native-core-assets.sh
 scripts/native-core-build.sh build
 scripts/native-ui-build.sh
 open '.work/native-ui/Clash Native.app'
@@ -42,6 +45,11 @@ Rust 脚本优先使用 `rust-toolchain.toml` 指定的**已安装**工具链。
 开发实例使用独立目录、socket 和端口。测试不接管或修改日常代理的
 系统代理、DNS、路由、TUN 或服务。发布签名与公证尚未实施；当前本地
 Swift 应用只有 ad-hoc 签名。
+
+mihomo 内核更新实现和接口继续保留，暂不自研或更换内核。当前原生
+构建固定已校验版本作为迁移基线；原生更新入口尚待接入。应用自身的
+上游自动更新默认关闭。旧 React/Tauri 及 Node 依赖暂用于未迁移功能的
+对照和回归检查，待系统代理、DNS/TUN 与旧数据迁移接通后再删除。
 
 ## 维护
 

@@ -102,7 +102,6 @@ impl Handle {
     }
 }
 
-#[cfg(target_os = "macos")]
 impl Handle {
     pub fn set_activation_policy(&self, policy: tauri::ActivationPolicy) -> Result<(), String> {
         Self::app_handle()

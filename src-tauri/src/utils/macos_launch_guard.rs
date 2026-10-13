@@ -446,7 +446,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
     #[test]
     fn canonicalization_accepts_symlink_in_and_rejects_symlink_escape() -> anyhow::Result<()> {
         use std::os::unix::fs::symlink;
@@ -479,7 +478,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
     #[test]
     fn allowed_root_symlink_escape_is_not_authorized() -> anyhow::Result<()> {
         use std::os::unix::fs::symlink;

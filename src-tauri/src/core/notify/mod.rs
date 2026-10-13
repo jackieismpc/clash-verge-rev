@@ -17,12 +17,12 @@ pub enum NoticeStatus {
     #[serde(rename = "core_start::error")]
     CoreStartError,
     #[serde(rename = "service_core::repair_required")]
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    #[allow(dead_code)]
     ServiceCoreRepairRequired,
     #[serde(rename = "service_core::app_data_not_owned")]
     ServiceCoreAppDataNotOwned,
     #[serde(rename = "service_core::sidecar_fallback")]
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    #[allow(dead_code)]
     ServiceCoreSidecarFallback,
     #[serde(rename = "dns_override::auto_disabled")]
     DnsOverrideAutoDisabled,

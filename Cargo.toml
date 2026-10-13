@@ -9,6 +9,7 @@ members = [
   "crates/clash-verge-i18n",
   "crates/clash-verge-limiter",
   "crates/clash-verge-native-core",
+  "crates/clash-verge-build-tools",
 ]
 resolver = "2"
 
@@ -89,21 +90,6 @@ serde_json = { version = "1.0.151" }
 serde_yaml_ng = { version = "0.10.0" }
 bitflags = { version = "2.13.2" }
 socket2 = "0.6.5"
-
-# *** For Windows platform only ***
-deelevate = "0.2.0"
-windows-sys = { version = "0.61.2", features = [
-  "Win32_Foundation",
-  "Win32_NetworkManagement_IpHelper",
-  "Win32_Networking_WinSock",
-  "Win32_Security",
-  "Win32_Security_Authorization",
-  "Win32_Storage_FileSystem",
-  "Win32_System_Threading",
-  "Win32_System_Diagnostics_ToolHelp",
-  "Win32_System_JobObjects",
-] }
-# *********************************
 
 [workspace.lints.clippy]
 # fallible_impl_from = "deny" // 过于激进，暂时不开启

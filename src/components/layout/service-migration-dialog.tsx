@@ -112,16 +112,6 @@ export const ServiceMigrationDialog = () => {
       setLoading(false)
       return
     }
-    if (outcome.status === 'sidecar') {
-      setWorkflowIncomplete(false)
-      setLoading(false)
-      showNotice.warning(
-        'settings.feedback.notifications.clashService.permissionFallback',
-        { reason: outcome.reason },
-        0,
-      )
-      return
-    }
 
     let restartSucceeded = false
     try {

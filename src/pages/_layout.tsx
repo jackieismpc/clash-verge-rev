@@ -10,10 +10,7 @@ import { LayoutSidebar } from '@/components/layout/layout-sidebar'
 import { NoticeManager } from '@/components/layout/notice-manager'
 import { ServiceMigrationDialog } from '@/components/layout/service-migration-dialog'
 import { SysproxyPrivilegeDialog } from '@/components/layout/sysproxy-privilege-dialog'
-import {
-  WindowControls,
-  WindowResizeHandles,
-} from '@/components/layout/window-controller'
+import { WindowControls } from '@/components/layout/window-controller'
 import { useI18n } from '@/hooks/use-i18n'
 import { useVerge } from '@/hooks/use-verge'
 import { useWindowDecorations } from '@/hooks/use-window'
@@ -132,30 +129,8 @@ const Layout = () => {
           borderTopLeftRadius: '0px',
           borderTopRightRadius: '0px',
         }}
-        onContextMenu={(e) => {
-          if (
-            OS === 'windows' &&
-            !['input', 'textarea'].includes(
-              e.currentTarget.tagName.toLowerCase(),
-            ) &&
-            !e.currentTarget.isContentEditable
-          ) {
-            e.preventDefault()
-          }
-        }}
-        sx={[
-          ({ palette }) => ({ bgcolor: palette.background.paper }),
-          OS === 'linux'
-            ? {
-                borderRadius: '8px',
-                width: '100vw',
-                height: '100vh',
-              }
-            : {},
-        ]}
+        sx={[({ palette }) => ({ bgcolor: palette.background.paper }), {}]}
       >
-        {decorated === false && <WindowResizeHandles />}
-
         {/* Custom titlebar - rendered only when decorated is false, memoized for performance */}
         {customTitlebar}
 

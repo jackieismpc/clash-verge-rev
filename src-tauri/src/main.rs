@@ -1,5 +1,3 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-
 use std::process::ExitCode;
 #[cfg(not(all(feature = "perf-harness", target_os = "macos")))]
 use std::sync::atomic::{AtomicUsize, Ordering};

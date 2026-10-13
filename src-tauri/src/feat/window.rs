@@ -9,21 +9,17 @@ use clash_verge_logging::{Type, logging};
 use parking_lot::Mutex;
 use std::sync::mpsc::RecvTimeoutError;
 use tokio::time::Duration;
-#[cfg(target_os = "macos")]
+
 use tokio::time::timeout;
 
-#[cfg(target_os = "windows")]
-const SESSION_ENDING_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 // TODO(macOS): a DNS script already running can outlast this and write after exit.
-#[cfg(not(target_os = "windows"))]
+
 const SESSION_ENDING_STOP_TIMEOUT: Duration = Duration::from_secs(3);
 
 // Outlasts the script's own kill deadline.
-#[cfg(target_os = "macos")]
+
 const DNS_RESTORE_TIMEOUT: Duration =
     crate::utils::resolve::dns::DNS_SCRIPT_TIMEOUT.saturating_add(Duration::from_secs(1));
-#[cfg(not(target_os = "macos"))]
-const DNS_RESTORE_TIMEOUT: Duration = Duration::ZERO;
 
 // Backstop for when the cleanup's own deadlines cannot fire.
 const SESSION_ENDING_HARD_DEADLINE: Duration = SESSION_ENDING_STOP_TIMEOUT
@@ -101,7 +97,6 @@ where
 }
 
 async fn restore_dns_after_core_stop() -> bool {
-    #[cfg(target_os = "macos")]
     match timeout(DNS_RESTORE_TIMEOUT, crate::utils::resolve::dns::restore_public_dns()).await {
         Ok(Ok(())) => {
             logging!(debug, Type::Window, "DNS设置已恢复");
@@ -116,8 +111,6 @@ async fn restore_dns_after_core_stop() -> bool {
             false
         }
     }
-    #[cfg(not(target_os = "macos"))]
-    true
 }
 
 pub async fn open_or_close_dashboard() {
@@ -150,7 +143,7 @@ pub async fn quit() -> clash_verge_signal::ShutdownOutcome {
         handle::Handle::global().clear_is_exiting();
         // A failed stop may still have marked the core stopped, and exit cleanup skipped the DNS restore.
         // A core that kept running keeps its DNS, whatever an unapplied config draft says.
-        #[cfg(target_os = "macos")]
+
         {
             let manager = CoreManager::global();
             let _lifecycle = manager.lifecycle_lock.lock().await;
@@ -299,7 +292,6 @@ async fn clean_session_ending_best_effort() -> CleanupResult {
     result
 }
 
-#[cfg(target_os = "macos")]
 pub async fn hide() {
     use crate::core::lightweight::add_light_weight_timer;
 

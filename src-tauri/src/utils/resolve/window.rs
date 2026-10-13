@@ -4,7 +4,7 @@ use tauri::webview::PageLoadEvent;
 use tauri::{Theme, WebviewWindow};
 
 use crate::{config::Config, core::handle, utils::resolve::window_script::build_window_initial_script};
-#[cfg(target_os = "macos")]
+
 use clash_verge_logging::logging;
 use clash_verge_logging::{Type, logging_error};
 
@@ -19,9 +19,6 @@ const DEFAULT_HEIGHT: f64 = 700.0;
 const MINIMAL_WIDTH: f64 = 520.0;
 const MINIMAL_HEIGHT: f64 = 520.0;
 
-#[cfg(target_os = "linux")]
-const DEFAULT_DECORATIONS: bool = false;
-#[cfg(not(target_os = "linux"))]
 const DEFAULT_DECORATIONS: bool = true;
 
 const fn restored_window_size_is_too_small(width: u32, height: u32) -> bool {
@@ -110,7 +107,7 @@ pub async fn build_new_window() -> Result<WebviewWindow, String> {
             logging_error!(Type::Window, window.set_background_color(Some(background_color)));
             restore_default_size_if_needed(&window);
             // A new page supersedes any reload marker left by the old window.
-            #[cfg(target_os = "macos")]
+
             take_webview_needs_reload();
             Ok(window)
         }
@@ -119,10 +116,8 @@ pub async fn build_new_window() -> Result<WebviewWindow, String> {
 }
 
 /// Defers recovery of a terminated hidden main webview until its next activation.
-#[cfg(target_os = "macos")]
 static WEBVIEW_NEEDS_RELOAD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-#[cfg(target_os = "macos")]
 pub fn take_webview_needs_reload() -> bool {
     WEBVIEW_NEEDS_RELOAD.swap(false, std::sync::atomic::Ordering::SeqCst)
 }
@@ -131,7 +126,6 @@ pub fn take_webview_needs_reload() -> bool {
 /// macOS may kill hidden WebContent under memory pressure. Clean orphaned Mihomo subscriptions,
 /// reload visible webviews immediately, and defer a hidden main-window reload until activation.
 /// Registering this callback replaces Tauri's default automatic reload.
-#[cfg(target_os = "macos")]
 pub fn on_web_content_process_terminated(webview: &tauri::Webview) {
     if handle::Handle::global().is_exiting() {
         return;
@@ -171,7 +165,6 @@ pub fn on_web_content_process_terminated(webview: &tauri::Webview) {
 }
 
 /// Consumes the shared marker for native unminimize paths that bypass `activate_window`.
-#[cfg(target_os = "macos")]
 pub fn reload_main_window_if_needed() {
     if !take_webview_needs_reload() {
         return;

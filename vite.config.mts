@@ -36,6 +36,6 @@ export default defineConfig({
     },
   },
   define: {
-    OS_PLATFORM: `"${process.platform}"`,
+    OS_PLATFORM: '"darwin"',
   },
 })

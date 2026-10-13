@@ -18,8 +18,6 @@ use tauri_plugin_shell::process::CommandChild;
 
 use crate::core::runstate::{RUN_STATE, RealEnv, RunStateStore};
 use crate::singleton;
-#[cfg(target_os = "windows")]
-use std::os::windows::io::OwnedHandle;
 
 pub(crate) static CLASH_LOGGER: LazyLock<Arc<LogRing>> = LazyLock::new(|| Arc::new(LogRing::new()));
 
@@ -91,8 +89,7 @@ pub struct CoreManager {
     run_state: &'static RunStateStore<RealEnv>,
     state: ArcSwap<State>,
     last_update: ArcSwapOption<Instant>,
-    #[cfg(target_os = "windows")]
-    job_handle: ArcSwapOption<OwnedHandle>,
+
     config_update_in_progress: AtomicBool,
     core_readiness_state: AtomicU64,
     startup_error: parking_lot::Mutex<Option<CoreFailure>>,
@@ -101,8 +98,6 @@ pub struct CoreManager {
     // 锁序固定为 config_update_in_progress → lifecycle_lock。
     pub(crate) lifecycle_lock: tokio::sync::Mutex<()>,
     // sidecar→service 交接 watcher 单实例标志。
-    #[cfg(target_os = "windows")]
-    handoff_watcher_running: AtomicBool,
 }
 
 /// Process-level state owned by `CoreManager`.
@@ -120,15 +115,12 @@ impl Default for CoreManager {
             run_state: &RUN_STATE,
             state: ArcSwap::new(Arc::new(State::default())),
             last_update: ArcSwapOption::new(None),
-            #[cfg(target_os = "windows")]
-            job_handle: ArcSwapOption::new(None),
+
             config_update_in_progress: AtomicBool::new(false),
             core_readiness_state: AtomicU64::new(0),
             startup_error: parking_lot::Mutex::new(None),
             sidecar_exit: tokio::sync::Mutex::new(None),
             lifecycle_lock: tokio::sync::Mutex::new(()),
-            #[cfg(target_os = "windows")]
-            handoff_watcher_running: AtomicBool::new(false),
         }
     }
 }
@@ -255,17 +247,6 @@ impl CoreManager {
 
     pub fn set_last_update(&self, time: Instant) {
         self.last_update.store(Some(Arc::new(time)));
-    }
-
-    /// Replaces the Windows Job Object handle owned by the core manager
-    ///
-    /// Passing `None` drops the current handle, which closes the Job Object
-    /// and terminates its assigned processes due to `KILL_ON_JOB_CLOSE`.
-    ///
-    /// This method is currently only used on Windows.
-    #[cfg(target_os = "windows")]
-    fn set_job_handle(&self, handle: Option<OwnedHandle>) {
-        self.job_handle.store(handle.map(Arc::new));
     }
 
     pub(crate) fn try_start_config_update(&self) -> bool {

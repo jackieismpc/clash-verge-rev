@@ -133,16 +133,11 @@ pub async fn upgrade_core(force: bool) -> Result<CoreUpgradeReport> {
         // Renaming one hard link over the other succeeds without consuming the name.
         let _ = std::fs::remove_file(&rollback);
         // Redundant once the rollback link exists; without one it is the only copy left.
-        #[cfg(windows)]
-        if restorable {
-            let _ = std::fs::remove_file(target.with_extension("old"));
-        }
+
         return Err(error);
     }
     let _ = std::fs::remove_file(&rollback);
     // The displaced core could not be deleted while it was still executing.
-    #[cfg(windows)]
-    let _ = std::fs::remove_file(target.with_extension("old"));
 
     Ok(CoreUpgradeReport { upgraded: true })
 }
@@ -164,7 +159,7 @@ enum ServiceStaging {
 /// The sidecar next to the app executable. On macOS development builds the Service runs a
 /// staged copy of this file, so writing here is what makes an upgrade survive the next start.
 fn managed_core_path(core: &str) -> Result<PathBuf> {
-    let extension = if cfg!(windows) { ".exe" } else { "" };
+    let extension = "";
     let path = current_exe()
         .context("failed to locate the current executable")?
         .with_file_name(format!("{core}{extension}"));
@@ -172,48 +167,20 @@ fn managed_core_path(core: &str) -> Result<PathBuf> {
 }
 
 /// Pins the package to the resolved version, so a release moving on mid-upgrade cannot 404.
-fn package_url(alpha: bool, version: &str) -> Result<std::string::String> {
-    let asset = asset_base_name(alpha)?;
-    let extension = if cfg!(windows) { "zip" } else { "gz" };
-    Ok(if alpha {
+fn package_url(alpha: bool, version: &str) -> std::string::String {
+    let asset = asset_base_name();
+    let extension = "gz";
+    if alpha {
         format!("{ALPHA_BASE_URL}/{asset}-{version}.{extension}")
     } else {
         format!("{RELEASE_DOWNLOAD_URL}/{version}/{asset}-{version}.{extension}")
-    })
+    }
 }
 
 /// Mirrors the asset map in `scripts/prebuild.mjs` so an upgrade keeps the build variant
 /// the bundled sidecar was taken from.
-fn asset_base_name(alpha: bool) -> Result<&'static str> {
-    let arch = std::env::consts::ARCH;
-    let unsupported = || anyhow!("no mihomo release asset for {}-{arch}", std::env::consts::OS);
-
-    let name = if cfg!(target_os = "windows") {
-        match arch {
-            "x86_64" => "mihomo-windows-amd64-v2",
-            "x86" => "mihomo-windows-386",
-            "aarch64" => "mihomo-windows-arm64",
-            _ => return Err(unsupported()),
-        }
-    } else if cfg!(target_os = "macos") {
-        match arch {
-            "x86_64" if alpha => "mihomo-darwin-amd64-v1-go122",
-            "x86_64" => "mihomo-darwin-amd64-v2-go122",
-            "aarch64" => "mihomo-darwin-arm64-go122",
-            _ => return Err(unsupported()),
-        }
-    } else {
-        match arch {
-            "x86_64" => "mihomo-linux-amd64-v2",
-            "x86" => "mihomo-linux-386",
-            "aarch64" => "mihomo-linux-arm64",
-            "arm" => "mihomo-linux-armv7",
-            "riscv64" => "mihomo-linux-riscv64",
-            "loongarch64" => "mihomo-linux-loong64",
-            _ => return Err(unsupported()),
-        }
-    };
-    Ok(name)
+const fn asset_base_name() -> &'static str {
+    "mihomo-darwin-arm64-go122"
 }
 
 /// Returns the proxy that reached GitHub so the package download reuses it.
@@ -279,7 +246,7 @@ fn is_usable_version(version: &str) -> bool {
 }
 
 async fn download_package(proxy: ProxyType, alpha: bool, version: &str) -> Result<Vec<u8>> {
-    let url = package_url(alpha, version)?;
+    let url = package_url(alpha, version);
     logging!(info, Type::Core, "core upgrade: downloading {url}");
 
     NetworkManager::new()
@@ -323,7 +290,6 @@ fn stage_core(target: &Path, package: &[u8], version: &str) -> Result<StagedCore
 
     unpack(package, &mut file).with_context(|| format!("failed to unpack the core package for {version}"))?;
 
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
 
@@ -376,15 +342,6 @@ fn create_staging_file(directory: &Path, core_name: &OsStr) -> Result<(PathBuf, 
     )
 }
 
-#[cfg(windows)]
-fn unpack(package: &[u8], out: &mut File) -> Result<()> {
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(package)).context("invalid core archive")?;
-    let mut entry = archive.by_index(0).context("the core archive is empty")?;
-    std::io::copy(&mut entry, out).context("failed to extract the core")?;
-    Ok(())
-}
-
-#[cfg(not(windows))]
 fn unpack(package: &[u8], out: &mut File) -> Result<()> {
     let mut decoder = flate2::read::GzDecoder::new(package);
     std::io::copy(&mut decoder, out).context("failed to decompress the core")?;
@@ -392,55 +349,12 @@ fn unpack(package: &[u8], out: &mut File) -> Result<()> {
 }
 
 impl StagedCore {
-    #[cfg(not(windows))]
     fn publish(self, target: &Path) -> Result<()> {
         std::fs::rename(&self.path, target)
             .with_context(|| format!("failed to publish the core to {}", target.display()))
     }
-
-    #[cfg(windows)]
-    fn publish(self, target: &Path) -> Result<()> {
-        if std::fs::rename(&self.path, target).is_ok() {
-            return Ok(());
-        }
-
-        // A running executable cannot be replaced on Windows, but it can be moved aside.
-        let displaced = target.with_extension("old");
-        let _ = std::fs::remove_file(&displaced);
-        std::fs::rename(target, &displaced)
-            .with_context(|| format!("failed to move the running core aside from {}", target.display()))?;
-
-        if let Err(error) = std::fs::rename(&self.path, target) {
-            // Say where the old core went when it cannot be put back either.
-            return match std::fs::rename(&displaced, target) {
-                Ok(()) => Err(error).with_context(|| format!("failed to publish the core to {}", target.display())),
-                Err(restore) => Err(error).with_context(|| {
-                    format!(
-                        "failed to publish the core to {} and to restore it from {}: {restore}",
-                        target.display(),
-                        displaced.display()
-                    )
-                }),
-            };
-        }
-
-        let _ = std::fs::remove_file(&displaced);
-        Ok(())
-    }
 }
 
-/// Keeps the `-v` probe and codesign from flashing a console window.
-#[cfg(windows)]
-fn new_command(program: impl AsRef<OsStr>) -> Command {
-    use std::os::windows::process::CommandExt as _;
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let mut command = Command::new(program);
-    command.creation_flags(CREATE_NO_WINDOW);
-    command
-}
-
-#[cfg(not(windows))]
 fn new_command(program: impl AsRef<OsStr>) -> Command {
     Command::new(program)
 }
@@ -487,8 +401,8 @@ mod tests {
 
     #[test]
     fn package_urls_pin_the_resolved_version() {
-        let release = package_url(false, "v1.19.30").unwrap_or_default();
-        let alpha = package_url(true, "alpha-c0e43eb").unwrap_or_default();
+        let release = package_url(false, "v1.19.30");
+        let alpha = package_url(true, "alpha-c0e43eb");
         assert!(release.contains("/releases/download/v1.19.30/"), "{release}");
         assert!(
             release.ends_with("-v1.19.30.gz") || release.ends_with("-v1.19.30.zip"),

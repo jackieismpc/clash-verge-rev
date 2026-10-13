@@ -148,7 +148,6 @@ pub async fn exit_lightweight_mode() -> bool {
     true
 }
 
-#[cfg(target_os = "macos")]
 pub async fn add_light_weight_timer() {
     setup_light_weight_timer().await;
 }

@@ -12,7 +12,7 @@ clearly labelled visual fixture instead.
 From the repository root, using the installed Command Line Tools (Swift 6.2+):
 
 ```sh
-node scripts/native-core-assets.mjs
+scripts/native-core-assets.sh
 scripts/native-core-build.sh build
 scripts/native-ui-build.sh
 open '.work/native-ui/Clash Native.app'
@@ -26,6 +26,12 @@ app bundles to `.work/native-ui`. Rust outputs and the verified pinned mihomo
 archive live in `.work/target` and `.work/engines`; they are never Git inputs. The bundle receives an ad-hoc local code
 signature; distribution signing and notarization are separate release tasks.
 No global Swift, Cargo, Xcode, shell, or proxy configuration is modified.
+Native build/test scripts use installed Rust and Swift plus system shell/codesign
+utilities. `clash-verge-build-tools` replaces the Node asset downloader with HTTPS,
+SHA256 verification, arm64 Mach-O validation and bounded gzip extraction. Offline
+mode fails closed on missing/corrupt archives and preserves the previous core.
+The mihomo update implementation remains in the legacy Rust layer and will be
+carried into the native client before retiring that layer.
 
 SDK 27 introduces a SwiftUI `State` macro whose plugin is absent from the current
 Command Line Tools distribution. `ViewState<Value>` explicitly aliases the

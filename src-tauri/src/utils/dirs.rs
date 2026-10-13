@@ -9,14 +9,14 @@ use std::{
 use tauri::Manager as _;
 
 #[cfg(not(feature = "verge-dev"))]
-pub static APP_ID: &str = "io.github.clash-verge-rev.clash-verge-rev";
+pub static APP_ID: &str = "io.github.jackieismpc.clash-verge-native";
 #[cfg(not(feature = "verge-dev"))]
-pub static BACKUP_DIR: &str = "clash-verge-rev-backup";
+pub static BACKUP_DIR: &str = "clash-native-backup";
 
 #[cfg(feature = "verge-dev")]
-pub static APP_ID: &str = "io.github.clash-verge-rev.clash-verge-rev.dev";
+pub static APP_ID: &str = "io.github.jackieismpc.clash-verge-native.dev";
 #[cfg(feature = "verge-dev")]
-pub static BACKUP_DIR: &str = "clash-verge-rev-backup-dev";
+pub static BACKUP_DIR: &str = "clash-native-backup-dev";
 
 pub static CLASH_CONFIG: &str = "config.yaml";
 pub static VERGE_CONFIG: &str = "verge.yaml";
@@ -78,14 +78,8 @@ pub fn app_logs_dir() -> Result<PathBuf> {
     Ok(app_home_dir()?.join("logs"))
 }
 
-#[cfg(target_os = "macos")]
 pub fn service_logs_root_dir() -> Result<PathBuf> {
     Ok(app_home_dir()?.join("service-logs"))
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn service_logs_root_dir() -> Result<PathBuf> {
-    app_logs_dir()
 }
 
 pub fn app_latest_log() -> Result<PathBuf> {
@@ -114,16 +108,9 @@ pub fn update_interval_migrated_path() -> Result<PathBuf> {
     Ok(app_home_dir()?.join(UPDATE_INTERVAL_MIGRATED))
 }
 
-#[cfg(target_os = "macos")]
 pub fn service_path() -> Result<PathBuf> {
     let res_dir = app_resources_dir()?;
     Ok(res_dir.join("clash-verge-service"))
-}
-
-#[cfg(windows)]
-pub fn service_path() -> Result<PathBuf> {
-    let res_dir = app_resources_dir()?;
-    Ok(res_dir.join("clash-verge-service.exe"))
 }
 
 pub fn sidecar_log_dir() -> Result<PathBuf> {
@@ -172,32 +159,17 @@ pub fn get_encryption_key() -> Result<Vec<u8>> {
 
 pub fn ipc_path() -> Result<PathBuf> {
     Ok(PathBuf::from(clash_verge_service_ipc::mihomo_ipc_path(
-        &crate::core::owner_identity::current_owner_identity()?,
+        &crate::core::owner_identity::current_owner_identity(),
     )))
 }
 
-#[cfg(target_os = "macos")]
 pub fn sidecar_ipc_path() -> Result<PathBuf> {
     sidecar_ipc_path_for(
         std::path::Path::new(""),
-        &crate::core::owner_identity::current_owner_identity()?,
+        &crate::core::owner_identity::current_owner_identity(),
     )
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn sidecar_ipc_path() -> Result<PathBuf> {
-    Ok(sidecar_ipc_path_for(
-        &preinit_app_data_dir()?,
-        &crate::core::owner_identity::current_owner_identity()?,
-    ))
-}
-
-#[cfg(target_os = "linux")]
-fn sidecar_ipc_path_for(app_root: &std::path::Path, _identity: &clash_verge_service_ipc::OwnerIdentity) -> PathBuf {
-    app_root.join("verge-mihomo.sock")
-}
-
-#[cfg(target_os = "macos")]
 fn sidecar_ipc_path_for(
     _app_root: &std::path::Path,
     _identity: &clash_verge_service_ipc::OwnerIdentity,
@@ -236,40 +208,6 @@ fn sidecar_ipc_path_for(
     Ok(path)
 }
 
-#[cfg(windows)]
-fn sidecar_ipc_path_for(_app_root: &std::path::Path, identity: &clash_verge_service_ipc::OwnerIdentity) -> PathBuf {
-    PathBuf::from(sidecar_pipe_name(identity, cfg!(feature = "verge-dev")))
-}
-
-#[cfg(any(windows, test))]
-fn sidecar_pipe_name(identity: &clash_verge_service_ipc::OwnerIdentity, is_dev: bool) -> String {
-    let flavor = if is_dev { "dev" } else { "release" };
-    format!(
-        r"\\.\pipe\verge-mihomo-sidecar-{flavor}-{}",
-        clash_verge_service_ipc::owner_key(identity)
-    )
-}
-
-#[cfg(all(test, target_os = "linux"))]
-mod ipc_tests {
-    use super::sidecar_ipc_path_for;
-    use clash_verge_service_ipc::OwnerIdentity;
-    use std::path::Path;
-
-    #[test]
-    fn sidecar_ipc_stays_in_the_app_root() {
-        let identity = OwnerIdentity::Unix { uid: 501, gid: 20 };
-        let app_root = Path::new("/home/test/.local/share/io.github.clash-verge-rev.clash-verge-rev");
-        let path = sidecar_ipc_path_for(app_root, &identity);
-
-        assert_eq!(path, app_root.join("verge-mihomo.sock"));
-        assert_ne!(
-            path.to_string_lossy(),
-            clash_verge_service_ipc::mihomo_ipc_path(&identity)
-        );
-    }
-}
-
 #[cfg(all(test, target_os = "macos"))]
 mod ipc_tests {
     use super::sidecar_ipc_path_for;
@@ -280,7 +218,7 @@ mod ipc_tests {
     fn sidecar_ipc_ignores_long_app_root_and_fits_sockaddr_un() -> anyhow::Result<()> {
         let identity = OwnerIdentity::Unix { uid: 501, gid: 20 };
         let app_root =
-            Path::new("/Users/support/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev.dev");
+            Path::new("/Users/support/Library/Application Support/io.github.jackieismpc.clash-verge-native.dev");
         let path = sidecar_ipc_path_for(app_root, &identity)?;
 
         assert!(!path.starts_with(app_root));
@@ -292,30 +230,6 @@ mod ipc_tests {
         assert_eq!(path, sidecar_ipc_path_for(Path::new("/different/root"), &identity)?);
         assert!(path.parent().is_some_and(Path::is_dir));
         Ok(())
-    }
-}
-
-#[cfg(all(test, windows))]
-mod ipc_tests {
-    use super::sidecar_ipc_path_for;
-    use clash_verge_service_ipc::OwnerIdentity;
-    use std::path::Path;
-
-    #[test]
-    fn sidecar_ipc_uses_the_current_owners_named_pipe() {
-        let identity = OwnerIdentity::Windows {
-            sid: "S-1-5-21-1000".to_owned(),
-        };
-        let path = sidecar_ipc_path_for(Path::new(r"C:\ignored"), &identity);
-
-        assert_eq!(
-            path,
-            Path::new(&format!(
-                r"\\.\pipe\verge-mihomo-sidecar-{}-{}",
-                if cfg!(feature = "verge-dev") { "dev" } else { "release" },
-                clash_verge_service_ipc::owner_key(&identity)
-            ))
-        );
     }
 }
 
@@ -332,28 +246,5 @@ impl PathBufExec for PathBuf {
             logging!(debug, Type::File, "Removed file: {:?}", self);
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod windows_pipe_name_tests {
-    use super::sidecar_pipe_name;
-    use clash_verge_service_ipc::OwnerIdentity;
-
-    #[test]
-    fn windows_sidecar_pipe_separates_dev_and_release_for_the_same_owner() {
-        let identity = OwnerIdentity::Windows {
-            sid: "S-1-5-21-1000".to_owned(),
-        };
-        let owner_key = clash_verge_service_ipc::owner_key(&identity);
-
-        assert_eq!(
-            sidecar_pipe_name(&identity, false),
-            format!(r"\\.\pipe\verge-mihomo-sidecar-release-{owner_key}")
-        );
-        assert_eq!(
-            sidecar_pipe_name(&identity, true),
-            format!(r"\\.\pipe\verge-mihomo-sidecar-dev-{owner_key}")
-        );
     }
 }

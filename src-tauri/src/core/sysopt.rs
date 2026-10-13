@@ -50,7 +50,7 @@ enum AuthoritativeState {
 /// Choose state from reliable evidence that a write landed.
 fn authoritative_state(error: &anyhow::Error, earlier_step_completed: bool) -> AuthoritativeState {
     // Linux setter success is not reliable write evidence.
-    authoritative_state_from(!cfg!(target_os = "linux"), error, earlier_step_completed)
+    authoritative_state_from(true, error, earlier_step_completed)
 }
 
 /// Testable form with explicit write-evidence reliability.
@@ -80,7 +80,6 @@ enum OsProxyState {
     DifferentOrUnknown,
 }
 
-#[cfg(any(target_os = "macos", test))]
 fn target_is_already_in_place(snapshot: &sysproxy::ProxySnapshot, sys: &Sysproxy, auto: &Autoproxy) -> bool {
     if auto.enable {
         // PAC writes bypass state too.
@@ -101,7 +100,6 @@ fn classify_os_proxy_state(snapshot: Result<bool>) -> OsProxyState {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn read_os_proxy_state(sys: &Sysproxy, auto: &Autoproxy) -> OsProxyState {
     // Use the per-protocol snapshot rather than the synthesized proxy view.
     let already_applied = Sysproxy::snapshot()
@@ -113,11 +111,6 @@ fn read_os_proxy_state(sys: &Sysproxy, auto: &Autoproxy) -> OsProxyState {
     }
 
     classify_os_proxy_state(already_applied)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn read_os_proxy_state(_sys: &Sysproxy, _auto: &Autoproxy) -> OsProxyState {
-    classify_os_proxy_state(Err(anyhow::anyhow!("per-protocol proxy snapshots are macOS only")))
 }
 
 /// Disable, drain a racing guard if needed, then disable again.
@@ -260,15 +253,8 @@ impl Default for Sysopt {
     }
 }
 
-#[cfg(target_os = "windows")]
-static DEFAULT_BYPASS: &str = "localhost;127.*;192.168.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;*.local;<local>";
-#[cfg(target_os = "windows")]
-static BYPASS_SEPARATOR: &str = ";";
-#[cfg(target_os = "linux")]
-static DEFAULT_BYPASS: &str = "localhost,127.0.0.1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,::1";
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 static BYPASS_SEPARATOR: &str = ",";
-#[cfg(target_os = "macos")]
+
 static DEFAULT_BYPASS: &str =
     "127.0.0.1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,localhost,*.local,*.crashlytics.com,<local>";
 
@@ -580,10 +566,8 @@ mod tests {
     use std::collections::VecDeque;
     use sysproxy::{Autoproxy, Sysproxy};
 
-    #[cfg(target_os = "macos")]
     use super::skip_without_network_service;
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn a_machine_with_no_network_service_has_nothing_to_turn_off() {
         for missing in [
@@ -597,7 +581,7 @@ mod tests {
     }
 
     /// Enabling the global proxy disables PAC first; that skipped step must not look like a write.
-    #[cfg(target_os = "macos")]
+
     #[test]
     fn a_skipped_step_is_not_evidence_that_the_os_was_touched() {
         let skipped = skip_without_network_service(false, Err(sysproxy::Error::NoActiveNetworkService));
@@ -614,7 +598,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn turning_the_proxy_on_without_a_network_service_still_fails() {
         assert!(skip_without_network_service(true, Err(sysproxy::Error::NoActiveNetworkService)).is_err());
@@ -636,15 +619,6 @@ mod tests {
         assert_eq!(
             format_bypass(true, "example.com"),
             format!("{DEFAULT_BYPASS}{BYPASS_SEPARATOR}example.com")
-        );
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_default_and_custom_bypass_use_semicolon() {
-        assert_eq!(
-            format_bypass(true, "example.com"),
-            format!("{DEFAULT_BYPASS};example.com")
         );
     }
 
@@ -716,7 +690,7 @@ mod tests {
         guard_told: Option<AuthoritativeState>,
         compensated: bool,
         state_unknown: bool,
-        #[cfg(not(target_os = "linux"))]
+
         message: String,
     }
 
@@ -744,7 +718,7 @@ mod tests {
             guard_told: *guard_told.lock(),
             compensated: *compensated.lock(),
             state_unknown: SystemProxyStateUnknown::is_in(&recovered),
-            #[cfg(not(target_os = "linux"))]
+
             message: format!("{recovered:#}"),
         }
     }
@@ -772,19 +746,6 @@ mod tests {
         assert!(!recovery.state_unknown);
     }
 
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn nothing_on_linux_ever_reaches_the_destructive_row() {
-        for earlier_step_completed in [false, true] {
-            let recovery = record_recovery(partly_written(), earlier_step_completed, true).await;
-
-            assert!(!recovery.compensated, "{earlier_step_completed}");
-            assert_eq!(recovery.guard_told, Some(AuthoritativeState::Unchanged));
-            assert!(!recovery.state_unknown);
-        }
-    }
-
-    #[cfg(not(target_os = "linux"))]
     #[tokio::test]
     async fn a_failure_that_wrote_something_forces_the_proxy_off() {
         let recovery = record_recovery(partly_written(), false, true).await;
@@ -794,7 +755,6 @@ mod tests {
         assert!(recovery.state_unknown);
     }
 
-    #[cfg(not(target_os = "linux"))]
     #[tokio::test]
     async fn a_compensation_that_fails_does_not_replace_the_diagnosis() {
         let recovery = record_recovery(partly_written(), false, false).await;
@@ -805,7 +765,6 @@ mod tests {
         assert!(recovery.state_unknown);
     }
 
-    #[cfg(not(target_os = "linux"))]
     #[tokio::test]
     async fn an_earlier_setter_that_finished_reaches_the_second_row_too() {
         let recovery = record_recovery(refused(), true, true).await;

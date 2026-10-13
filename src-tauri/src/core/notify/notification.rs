@@ -15,30 +15,13 @@ pub enum FrontendEvent<'a> {
     RefreshVerge,
     RefreshProfiles,
     RefreshProxyConfig,
-    NoticeMessage {
-        status: NoticeStatus,
-        message: Arc<str>,
-    },
-    ProfileChanged {
-        current_profile_id: &'a String,
-    },
-    TimerUpdated {
-        profile_index: &'a String,
-    },
-    ProfileUpdateStarted {
-        uid: &'a String,
-    },
-    ProfileUpdateCompleted {
-        uid: &'a String,
-    },
-    RunStateChanged {
-        state: crate::core::runstate::RunStateView,
-    },
+    NoticeMessage { status: NoticeStatus, message: Arc<str> },
+    ProfileChanged { current_profile_id: &'a String },
+    TimerUpdated { profile_index: &'a String },
+    ProfileUpdateStarted { uid: &'a String },
+    ProfileUpdateCompleted { uid: &'a String },
+    RunStateChanged { state: crate::core::runstate::RunStateView },
     PendingFailuresChanged,
-    #[cfg(target_os = "linux")]
-    ThemeChanged {
-        theme: tauri::Theme,
-    },
 }
 
 /// Operation associated with a pending failure.
@@ -444,8 +427,6 @@ macro_rules! frontend_events {
                     let payload: $payload = $value;
                     ($name, serde_json::to_value(payload))
                 },)*
-                #[cfg(target_os = "linux")]
-                FrontendEvent::ThemeChanged { theme } => ("tauri://theme-changed", serde_json::to_value(theme)),
             }
         }
     };

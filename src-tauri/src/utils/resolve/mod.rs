@@ -22,7 +22,6 @@ use crate::{
 use clash_verge_logging::{Type, logging, logging_error};
 use clash_verge_signal;
 
-#[cfg(target_os = "macos")]
 pub mod dns;
 mod scheme;
 pub(crate) mod window;
@@ -43,8 +42,6 @@ pub(crate) fn resolve_setup_sync() {
     AsyncHandler::spawn(|| async {
         AsyncHandler::spawn_blocking(init_scheme);
         AsyncHandler::spawn_blocking(server::embed_server);
-        #[cfg(target_os = "linux")]
-        AsyncHandler::spawn_blocking(watch_linux_theme_changed);
     });
 }
 
@@ -59,7 +56,6 @@ async fn resolve_setup() {
     // Migrate before windows or timers can change the loaded config.
     logging_error!(Type::Setup, init::migrate_short_update_intervals().await);
 
-    #[cfg(target_os = "macos")]
     resolve_dock_show().await;
     init_startup_script().await;
     init_service_manager().await;
@@ -76,7 +72,7 @@ async fn resolve_setup() {
     Config::verify_config_initialization().await;
 
     // Live before the core starts, so a service appearing mid-start is not missed.
-    #[cfg(target_os = "macos")]
+
     crate::core::network_watch::start();
 
     let core_init = AsyncHandler::spawn(|| async {
@@ -101,7 +97,6 @@ async fn resolve_setup() {
 pub async fn resolve_reset_async() -> Result<(), anyhow::Error> {
     CoreManager::global().stop_core().await?;
 
-    #[cfg(target_os = "macos")]
     {
         use dns::restore_public_dns;
         restore_public_dns().await?;
@@ -116,30 +111,6 @@ fn init_scheme() {
 
 pub(crate) async fn resolve_scheme(param: &str) {
     logging_error!(Type::Setup, scheme::resolve_scheme(param).await);
-}
-
-#[cfg(target_os = "linux")]
-fn watch_linux_theme_changed() {
-    match dark_light::subscribe() {
-        Ok(watcher) => {
-            for mode in watcher.iter() {
-                use crate::core::notification;
-
-                let theme = match mode {
-                    dark_light::Mode::Light => tauri::Theme::Light,
-                    dark_light::Mode::Dark => tauri::Theme::Dark,
-                    dark_light::Mode::Unspecified => tauri::Theme::Light, // fallback to light
-                };
-                notification::NotificationSystem::send_event(
-                    Handle::app_handle().clone(),
-                    notification::FrontendEvent::ThemeChanged { theme },
-                );
-            }
-        }
-        Err(e) => {
-            logging_error!(Type::Setup, "Fail to watch linux theme changed: {}", e);
-        }
-    }
 }
 
 async fn init_resources() {
@@ -240,7 +211,6 @@ async fn init_window() {
     WindowManager::create_window(!is_silent_start).await;
 }
 
-#[cfg(target_os = "macos")]
 async fn resolve_dock_show() {
     let is_silent_start = Config::verge().await.data_arc().enable_silent_start.unwrap_or(false);
     if is_silent_start {

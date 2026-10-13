@@ -42,7 +42,6 @@ import {
 } from '@/services/cmds'
 import { showNotice } from '@/services/notice-service'
 import { debugLog } from '@/utils/debug'
-import getSystem from '@/utils/get-system'
 
 const DEFAULT_PAC = `function FindProxyForURL(url, host) {
   return "PROXY %proxy_host%:%mixed-port%; SOCKS5 %proxy_host%:%mixed-port%; DIRECT;";
@@ -64,18 +63,14 @@ const ipv6_part = '(?:[a-fA-F0-9:])+'
 
 const rLocal = `localhost|<local>|localdomain`
 
-const getValidReg = (isWindows: boolean) => {
+const getValidReg = () => {
   // 127.0.0.1 (full ipv4)
   const rIPv4Unix = String.raw`(?:${ipv4_part}\.){3}${ipv4_part}(?:\/\d{1,2})?`
-  const rIPv4Windows = String.raw`(?:${ipv4_part}\.){3}${ipv4_part}`
 
   const rIPv6Unix = String.raw`(?:${ipv6_part}:+)+${ipv6_part}(?:\/\d{1,3})?`
-  const rIPv6Windows = String.raw`(?:${ipv6_part}:+)+${ipv6_part}`
 
-  const rValidPart = `${rDomainSimple}|${
-    isWindows ? rIPv4Windows : rIPv4Unix
-  }|${isWindows ? rIPv6Windows : rIPv6Unix}|${rLocal}`
-  const separator = isWindows ? ';' : ','
+  const rValidPart = `${rDomainSimple}|${rIPv4Unix}|${rIPv6Unix}|${rLocal}`
+  const separator = ','
   const rValid = String.raw`^(${rValidPart})(?:${separator}\s?(${rValidPart}))*${separator}?$`
 
   return new RegExp(rValid)
@@ -89,9 +84,7 @@ const splitBypass = (value?: string) =>
 
 export const SysproxyViewer = forwardRef<DialogRef>((props, ref) => {
   const { t } = useTranslation()
-  const systemName = getSystem()
-  const isWindows = systemName === 'windows'
-  const validReg = useMemo(() => getValidReg(isWindows), [isWindows])
+  const validReg = useMemo(() => getValidReg(), [])
 
   const [open, setOpen] = useState(false)
   const [editorOpen, setEditorOpen] = useState(false)
@@ -134,15 +127,9 @@ export const SysproxyViewer = forwardRef<DialogRef>((props, ref) => {
     getEmbeddedServerPort().then(setEmbeddedServerPort).catch(console.error)
   }, [])
 
-  const separator = useMemo(() => (isWindows ? ';' : ','), [isWindows])
+  const separator = ','
 
   const defaultBypass = () => {
-    if (isWindows) {
-      return 'localhost;127.*;192.168.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;*.local;<local>'
-    }
-    if (systemName === 'linux') {
-      return 'localhost,127.0.0.1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,::1'
-    }
     return '127.0.0.1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,localhost,*.local,*.crashlytics.com,<local>'
   }
 

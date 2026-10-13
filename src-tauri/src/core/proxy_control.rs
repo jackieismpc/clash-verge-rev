@@ -137,17 +137,6 @@ fn classify_local_failure(error: anyhow::Error) -> anyhow::Error {
     error
 }
 
-#[cfg(target_os = "windows")]
-fn was_a_failed_system_call(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        matches!(
-            cause.downcast_ref::<sysproxy::Error>(),
-            Some(sysproxy::Error::SystemCall(_))
-        )
-    })
-}
-
-#[cfg(not(target_os = "windows"))]
 const fn was_a_failed_system_call(_error: &anyhow::Error) -> bool {
     false
 }
@@ -167,17 +156,11 @@ fn was_refused_locally(error: &anyhow::Error) -> bool {
 /// Offline, mid network switch, or the primary interface is not a configured service. A read
 /// reports "no proxy" and a disable has nothing left to do; an enable still fails, since a proxy
 /// the OS never received must not be recorded as applied.
-#[cfg(target_os = "macos")]
 pub const fn is_missing_network_service(error: &sysproxy::Error) -> bool {
     matches!(
         error,
         sysproxy::Error::NoActiveNetworkService | sysproxy::Error::NetworkInterface
     )
-}
-
-#[cfg(not(target_os = "macos"))]
-pub const fn is_missing_network_service(_error: &sysproxy::Error) -> bool {
-    false
 }
 
 /// Distinguish a misplaced sidecar from a missing privileged service.
@@ -385,7 +368,6 @@ async fn current_service_proxy_config(verge: &IVerge) -> Result<MacosProxyConfig
 }
 
 /// Whether macOS has a network service to write the proxy on right now.
-#[cfg(target_os = "macos")]
 pub async fn has_network_service() -> bool {
     tokio::task::spawn_blocking(|| sysproxy::Sysproxy::has_network_service().unwrap_or(true))
         .await
@@ -1012,7 +994,6 @@ mod tests {
         assert_eq!(format!("{untouched:#}"), "port already in use");
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn a_refusal_wrapped_in_write_progress_is_still_classified() {
         let wrapped = anyhow::Error::new(sysproxy::Error::ProxyWrite {
@@ -1029,7 +1010,6 @@ mod tests {
         ));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn a_refused_write_is_classified_on_macos() {
         let classified = classify_local_failure(wrapped_privilege_failure());
@@ -1047,14 +1027,6 @@ mod tests {
             "classifying must keep the original failure reachable: {classified:#}"
         );
         assert!(format!("{classified:#}").contains("failed to apply the system proxy"));
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn nothing_is_classified_off_macos() {
-        let classified = classify_local_failure(wrapped_privilege_failure());
-
-        assert!(SysproxyFailure::from_chain(&classified).is_none());
     }
 
     #[test]
@@ -1097,10 +1069,8 @@ mod tests {
 
     use super::{SystemProxyStateUnknown, is_reportable_given, rollback_failure};
 
-    #[cfg(target_os = "macos")]
     use super::service_apply_result;
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn an_enable_the_os_never_received_is_never_reported_as_applied() {
         let requested = MacosProxyConfig::Global {
@@ -1124,7 +1094,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn a_disable_is_satisfied_by_the_os_ending_up_direct() {
         assert!(

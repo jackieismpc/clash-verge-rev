@@ -1,13 +1,7 @@
 import { useState } from 'react'
 import { beforeEach, expect, it, vi } from 'vitest'
 
-import {
-  getRuntimeState,
-  installService,
-  restartCore,
-  type RunState,
-} from '@/services/cmds'
-import { showNotice } from '@/services/notice-service'
+import { getRuntimeState, type RunState } from '@/services/cmds'
 
 import { ServiceMigrationDialog } from './service-migration-dialog'
 
@@ -59,38 +53,6 @@ it.each([
     expect(dialog.props.disableCancel).toBe(true)
   },
 )
-
-it('reports the permission refusal and finishes after installation falls back to Sidecar', async () => {
-  store.runState = {
-    service: 'notInstalled',
-    mode: 'NotRunning',
-  } as unknown as RunState
-  const reason = 'core path C:\\ is writable by Everyone'
-  vi.mocked(installService).mockResolvedValue({ status: 'sidecar', reason })
-  vi.mocked(getRuntimeState).mockResolvedValue({
-    service: 'unavailable',
-    mode: 'Sidecar',
-    sidecarAllowed: true,
-    serviceNeedsAttention: false,
-  } as RunState)
-
-  const dialog = ServiceMigrationDialog()
-  dialog.props.onOk()
-  await vi.waitFor(() => {
-    expect(showNotice.warning).toHaveBeenCalledWith(
-      'settings.feedback.notifications.clashService.permissionFallback',
-      { reason },
-      0,
-    )
-  })
-
-  expect(restartCore).not.toHaveBeenCalled()
-  expect(showNotice.error).not.toHaveBeenCalled()
-  expect(showNotice.success).not.toHaveBeenCalled()
-  expect(vi.mocked(useState).mock.results[2].value[1]).toHaveBeenLastCalledWith(
-    false,
-  )
-})
 
 it.each([
   { service: 'notInstalled', mode: 'NotRunning' },

@@ -33,14 +33,6 @@ export const useServiceInstaller = () => {
       'settings.statuses.clashService.installing',
     )
     if (!installResult.ok) return
-    if (installResult.value.status === 'sidecar') {
-      showNotice.warning(
-        'settings.feedback.notifications.clashService.permissionFallback',
-        { reason: installResult.value.reason },
-        0,
-      )
-      return
-    }
     showNotice.success(
       'settings.feedback.notifications.clashService.installSuccess',
     )

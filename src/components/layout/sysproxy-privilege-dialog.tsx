@@ -121,13 +121,8 @@ export const SysproxyPrivilegeDialog = () => {
         })
         if (result.ok) outcome = result.value
       }
-      if (outcome?.status === 'sidecar') {
-        showNotice.warning(
-          'settings.feedback.notifications.clashService.permissionFallback',
-          { reason: outcome.reason },
-          0,
-        )
-        close()
+      if (remedy !== 'restartOnly' && !outcome) {
+        setStep('idle')
         return
       }
       setStep('restarting')

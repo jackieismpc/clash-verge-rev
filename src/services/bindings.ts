@@ -74,7 +74,6 @@ export const commands = {
     __TAURI_INVOKE<ValidationOutcome>('update_proxy_chain_config_in_runtime', {
       proxyChainConfig,
     }),
-  invokeUwpTool: () => __TAURI_INVOKE<null>('invoke_uwp_tool'),
   copyClashEnv: () => __TAURI_INVOKE<null>('copy_clash_env'),
   syncTrayProxySelection: () =>
     __TAURI_INVOKE<null>('sync_tray_proxy_selection'),
@@ -435,8 +434,6 @@ export type IVerge_Deserialize = {
   tray_icon?: string | null
   verge_redir_port?: number | null
   verge_redir_enabled?: boolean | null
-  verge_tproxy_port?: number | null
-  verge_tproxy_enabled?: boolean | null
   enable_tray_speed?: boolean | null
 }
 
@@ -525,8 +522,6 @@ export type IVerge_Serialize = {
   tray_icon?: string | null
   verge_redir_port?: number | null
   verge_redir_enabled?: boolean | null
-  verge_tproxy_port?: number | null
-  verge_tproxy_enabled?: boolean | null
   enable_tray_speed?: boolean | null
 }
 
@@ -636,8 +631,6 @@ export type PlatformVergeFields = {
   tray_icon?: string | null
   verge_redir_port?: number | null
   verge_redir_enabled?: boolean | null
-  verge_tproxy_port?: number | null
-  verge_tproxy_enabled?: boolean | null
   enable_tray_speed?: boolean | null
 }
 
@@ -886,7 +879,6 @@ export type ProxyPortSettings = {
   socks: ToggleableProxyPort
   http: ToggleableProxyPort
   redir: ToggleableProxyPort
-  tproxy: ToggleableProxyPort
 }
 
 export type ProxyProviderVehicleType = 'HTTP' | 'File' | 'Inline'
@@ -982,9 +974,7 @@ export type ServiceHealthKind =
   | 'versionMismatch'
   | 'unavailable'
 
-export type ServiceInstallOutcome =
-  | { status: 'installed' }
-  | { status: 'sidecar'; reason: string }
+export type ServiceInstallOutcome = { status: 'installed' }
 
 /**  A removal has a revision too, so a delayed read cannot restore a resolved failure. */
 export type SidecarFailureSnapshot = {

@@ -21,7 +21,7 @@ use anyhow::Result;
 use clash_verge_logging::{Type, logging};
 use std::sync::OnceLock;
 use tauri::{AppHandle, Manager as _};
-#[cfg(target_os = "macos")]
+
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_deep_link::DeepLinkExt as _;
 
@@ -80,12 +80,6 @@ mod app_init {
 
     /// Setup deep link handling
     pub fn setup_deep_links(app: &tauri::App) {
-        #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
-        {
-            logging!(debug, Type::Setup, "注册深层链接...");
-            let _ = app.deep_link().register_all();
-        }
-
         app.deep_link().on_open_url(|event| {
             let urls = event.urls();
             AsyncHandler::spawn(move || async move {
@@ -98,12 +92,8 @@ mod app_init {
 
     /// Setup autostart plugin
     pub fn setup_autostart(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-        #[cfg(target_os = "macos")]
         let mut auto_start_plugin_builder = tauri_plugin_autostart::Builder::new();
-        #[cfg(not(target_os = "macos"))]
-        let auto_start_plugin_builder = tauri_plugin_autostart::Builder::new();
 
-        #[cfg(target_os = "macos")]
         {
             auto_start_plugin_builder = auto_start_plugin_builder
                 .macos_launcher(MacosLauncher::LaunchAgent)
@@ -161,25 +151,12 @@ pub fn run() -> std::process::ExitCode {
     }
 
     // Runs before the singleton check, which is the first thing to open a file in that directory.
-    #[cfg(windows)]
-    if let Err(error) =
-        utils::dirs::preinit_app_data_dir().and_then(|root| core::owner_identity::repair_app_data_root_owner(&root))
-    {
-        // The logger is installed later in setup(), so this would otherwise be lost.
-        eprintln!("[clash-verge] 应用数据目录所有权修复失败: {error:#}");
-        logging!(error, Type::Setup, "应用数据目录所有权修复失败: {error:#}");
-    }
 
     match handle_singleton_startup(app_init::init_singleton_check(), utils::startup::report_error) {
         StartupAction::Continue => {}
         StartupAction::ExitSuccess => return std::process::ExitCode::SUCCESS,
         StartupAction::ExitFailure => return std::process::ExitCode::FAILURE,
     }
-
-    #[cfg(target_os = "linux")]
-    utils::linux::workarounds::apply_nvidia_dmabuf_renderer_workaround();
-    #[cfg(target_os = "linux")]
-    utils::linux::workarounds::apply_wayland_webkit_fix();
 
     let builder = app_init::setup_plugins(tauri::Builder::default())
         .setup(|app| {
@@ -242,11 +219,11 @@ pub fn run() -> std::process::ExitCode {
     // macOS 内存压力下 WKWebView 渲染进程可能被系统终止（表现为白屏），
     // 注册恢复钩子：清理孤儿 WebSocket 订阅防止内存泄漏；窗口可见时立即 reload
     // 恢复页面，不可见时延迟到用户下次打开窗口再 reload。
-    #[cfg(target_os = "macos")]
+
     let builder = builder.on_web_content_process_terminate(resolve::window::on_web_content_process_terminated);
 
     mod event_handlers {
-        #[cfg(target_os = "macos")]
+
         use crate::core::lightweight;
         use crate::utils::window_manager::WindowManager;
         use crate::{
@@ -256,7 +233,7 @@ pub fn run() -> std::process::ExitCode {
         };
         use clash_verge_logging::{Type, logging};
         use tauri::AppHandle;
-        #[cfg(target_os = "macos")]
+
         use tauri::Manager as _;
 
         pub fn handle_ready_resumed(_app_handle: &AppHandle) {
@@ -268,13 +245,11 @@ pub fn run() -> std::process::ExitCode {
             logging!(info, Type::System, "应用就绪");
             crate::utils::server::set_commands_ready();
 
-            #[cfg(target_os = "macos")]
             if let Some(window) = _app_handle.get_webview_window("main") {
                 let _ = window.set_title("Clash Verge");
             }
         }
 
-        #[cfg(target_os = "macos")]
         pub async fn handle_reopen(has_visible_windows: bool) {
             if lightweight::is_in_lightweight_mode() {
                 lightweight::exit_lightweight_mode().await;
@@ -288,7 +263,6 @@ pub fn run() -> std::process::ExitCode {
         }
 
         pub fn handle_window_close(api: &tauri::WindowEvent) {
-            #[cfg(target_os = "macos")]
             handle::Handle::global().set_activation_policy_accessory();
 
             if core::handle::Handle::global().is_exiting() {
@@ -308,7 +282,6 @@ pub fn run() -> std::process::ExitCode {
                 let is_enable_global_hotkey = Config::verge().await.data_arc().enable_global_hotkey.unwrap_or(true);
 
                 if focused {
-                    #[cfg(target_os = "macos")]
                     {
                         use crate::core::hotkey::SystemHotkey;
                         let _ = hotkey::Hotkey::global()
@@ -324,7 +297,6 @@ pub fn run() -> std::process::ExitCode {
                     return;
                 }
 
-                #[cfg(target_os = "macos")]
                 {
                     use crate::core::hotkey::SystemHotkey;
                     let _ = hotkey::Hotkey::global().unregister_system_hotkey(SystemHotkey::CmdQ);
@@ -337,7 +309,6 @@ pub fn run() -> std::process::ExitCode {
             });
         }
 
-        #[cfg(target_os = "macos")]
         pub fn handle_window_destroyed() {
             use crate::core::hotkey::SystemHotkey;
             AsyncHandler::spawn(move || async move {
@@ -372,7 +343,7 @@ pub fn run() -> std::process::ExitCode {
             }
             event_handlers::handle_ready_resumed(app_handle);
         }
-        #[cfg(target_os = "macos")]
+
         tauri::RunEvent::Reopen {
             has_visible_windows, ..
         } => {
@@ -420,13 +391,13 @@ pub fn run() -> std::process::ExitCode {
             }
             tauri::WindowEvent::Focused(focused) => {
                 // 兜底：原生取消最小化只触发 Focused、不走 activate_window（macOS）
-                #[cfg(target_os = "macos")]
+
                 if focused {
                     crate::utils::resolve::window::reload_main_window_if_needed();
                 }
                 event_handlers::handle_window_focus(focused);
             }
-            #[cfg(target_os = "macos")]
+
             tauri::WindowEvent::Destroyed => {
                 event_handlers::handle_window_destroyed();
             }

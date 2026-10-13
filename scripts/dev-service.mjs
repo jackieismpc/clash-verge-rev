@@ -1,5 +1,5 @@
-import { execFileSync, spawn } from 'node:child_process'
-import { access } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
+import { access, mkdir } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -24,7 +24,6 @@ function run(command, args, options = {}) {
     const child = spawn(command, args, {
       env: options.env ?? process.env,
       stdio: options.stdio ?? 'inherit',
-      windowsHide: true,
     })
     let stdout = ''
     child.stdout?.setEncoding('utf8')
@@ -47,7 +46,19 @@ function run(command, args, options = {}) {
 }
 
 export async function prepareDevelopmentService() {
+  if (process.platform !== 'darwin' || process.arch !== 'arm64') {
+    throw new Error('Development service requires macOS on Apple Silicon')
+  }
   await access(serviceManifest)
+  const env = {
+    ...process.env,
+    CARGO_HOME: process.env.CARGO_HOME || join(repositoryRoot, '.work', 'cargo'),
+    TMPDIR: process.env.TMPDIR || join(repositoryRoot, '.work', 'tmp'),
+    MACOSX_DEPLOYMENT_TARGET: '26.0',
+  }
+  for (const name of ['CARGO_HOME', 'TMPDIR']) {
+    await mkdir(env[name], { recursive: true })
+  }
   const output = await run(
     'cargo',
     [
@@ -56,13 +67,16 @@ export async function prepareDevelopmentService() {
       serviceManifest,
       '--target-dir',
       process.env.CARGO_TARGET_DIR ||
-        join(serviceRepository, 'target', 'development'),
+        join(repositoryRoot, '.work', 'target', 'development-service'),
+      '--target',
+      'aarch64-apple-darwin',
+      '--locked',
       '--features',
       'standalone,client,development-channel',
       '--bins',
       '--message-format=json-render-diagnostics',
     ],
-    { stdio: ['inherit', 'pipe', 'inherit'] },
+    { stdio: ['inherit', 'pipe', 'inherit'], env },
   )
 
   const artifacts = new Map()
@@ -103,26 +117,23 @@ export async function prepareDevelopmentService() {
 export async function ensureDevelopmentService({
   platform = process.platform,
 } = {}) {
+  if (platform !== 'darwin') throw new Error('Development service requires macOS')
   const serviceDirectory = await prepareDevelopmentService()
-  const extension = platform === 'win32' ? '.exe' : ''
   const installer = join(
     serviceDirectory,
-    `clash-verge-service-install${extension}`,
+    'clash-verge-service-install',
   )
-  const host = execFileSync('rustc', ['-vV'], { encoding: 'utf8' }).match(
-    /^host: (.+)$/m,
-  )?.[1]
-  if (!host) throw new Error('rustc did not report its host target')
+  const host = 'aarch64-apple-darwin'
   const args = ['--prepare-install', '--ensure']
   for (const name of ['verge-mihomo', 'verge-mihomo-alpha']) {
     args.push(
       '--core',
-      `${name}${extension}`,
+      name,
       join(
         repositoryRoot,
         'src-tauri',
         'sidecar',
-        `${name}-${host}${extension}`,
+        `${name}-${host}`,
       ),
     )
   }

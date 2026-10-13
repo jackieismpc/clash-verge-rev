@@ -2,6 +2,9 @@ const SERVICE_URL_PREFIX =
   'https://github.com/clash-verge-rev/clash-verge-service-ipc/releases/download'
 
 export function resolveServiceRelease(cargoManifest, host, platform) {
+  if (host !== 'aarch64-apple-darwin' || platform !== 'darwin') {
+    throw new Error('Service bundles support macOS on Apple Silicon only')
+  }
   const dependency = cargoManifest
     .split(/\r?\n/)
     .find((line) => line.trimStart().startsWith('clash_verge_service_ipc ='))
@@ -13,8 +16,7 @@ export function resolveServiceRelease(cargoManifest, host, platform) {
   }
 
   const version = `v${packageVersion}`
-  const archiveExt = platform === 'win32' ? 'zip' : 'tar.gz'
-  const archiveFile = `clash-verge-service-ipc-${version}-${host}.${archiveExt}`
+  const archiveFile = `clash-verge-service-ipc-${version}-${host}.tar.gz`
   return {
     version,
     archiveFile,

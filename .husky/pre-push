@@ -1,4 +1,4 @@
 #!/bin/sh
 set -eu
 git diff --check
-# Native and legacy checks use project-local toolchains and caches.
+# Native and legacy checks use installed toolchains and project-local caches.

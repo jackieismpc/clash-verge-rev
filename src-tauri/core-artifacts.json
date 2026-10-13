@@ -1,0 +1,15 @@
+{
+  "target": "aarch64-apple-darwin",
+  "cores": {
+    "stable": {
+      "version": "v1.19.32",
+      "url": "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.32/mihomo-darwin-arm64-go122-v1.19.32.gz",
+      "sha256": "d8da658a4d627f602a2df35f17244a713df36e067cde8346fad6f808eaf12502"
+    },
+    "alpha": {
+      "version": "alpha-bc76c13",
+      "url": "https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha/mihomo-darwin-arm64-go122-alpha-bc76c13.gz",
+      "sha256": "e83a0cfbd0532f2d0bc3eee87fb39cb7e5f10004d39b247a17e1bc3fa65011c8"
+    }
+  }
+}

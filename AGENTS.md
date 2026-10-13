@@ -8,9 +8,10 @@ required. Preserve the GPL license, source attribution, and Git history.
 - Work directly on `main`. Validate each coherent change before
   `git commit -s -S`. Use English Conventional Commit subjects. Never fall back to
   an unsigned commit, rewrite published history, or open an upstream PR.
-- Keep tools, downloads, caches, build outputs, fixtures, and reports in `.work`.
-  Configure Git locally and tool environments per child process; do not install
-  global tools or change global shell, Rustup, Cargo, or Xcode settings.
+- Use the existing machine Rust and Swift toolchains; do not install duplicate
+  project toolchains. Keep build outputs, fixtures, and reports in `.work`.
+  Configure Git locally and build environments per child process; do not change
+  global shell or Xcode settings.
 - Do not stop, reconfigure, or take ownership of the user's daily proxy. Use
   separate application data, controller sockets, ports, and service channels.
 - Keep the existing UI usable until all retained workflows work in SwiftUI.

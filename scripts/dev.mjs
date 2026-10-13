@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
-import { join } from 'node:path'
+import { mkdirSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import {
@@ -15,6 +16,8 @@ import {
   prepareDevelopmentService,
 } from './dev-service.mjs'
 
+const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+
 const FORCE_GRACE_MS = 2_000
 const SHUTDOWN_TIMEOUT_MS = 10_000
 const FORCE_POLL_MS = 50
@@ -25,9 +28,17 @@ export function buildTauriInvocation(
   environment = process.env,
   platform = process.platform,
 ) {
-  const env = { ...environment, RUST_BACKTRACE: 'full' }
+  if (platform !== 'darwin') throw new Error('Development requires macOS on Apple Silicon')
+  const env = {
+    ...environment,
+    RUST_BACKTRACE: 'full',
+    MACOSX_DEPLOYMENT_TARGET: '26.0',
+    CARGO_HOME: environment.CARGO_HOME || join(repositoryRoot, '.work', 'cargo'),
+    CARGO_TARGET_DIR: environment.CARGO_TARGET_DIR || join(repositoryRoot, '.work', 'target'),
+    TMPDIR: environment.TMPDIR || join(repositoryRoot, '.work', 'tmp'),
+  }
   const features = mode === 'sidecar' ? 'verge-dev,dev-sidecar' : 'verge-dev'
-  const args = ['exec', 'tauri', 'dev', '-f', features]
+  const args = ['exec', 'tauri', 'dev', '--target', 'aarch64-apple-darwin', '-f', features]
   if (mode === 'trace') {
     env.RUSTFLAGS = '--cfg tokio_unstable'
     args.push('tokio-trace')
@@ -39,7 +50,7 @@ export function buildTauriInvocation(
     command: 'pnpm',
     args,
     env,
-    detached: platform === 'darwin',
+    detached: true,
   }
 }
 
@@ -157,6 +168,9 @@ export async function runDevAnchor(mode, dependencies = {}) {
     throw new Error('usage: node scripts/dev.mjs --anchor <dev|trace|sidecar>')
   }
 
+  if (platform !== 'darwin') throw new Error('Development requires macOS on Apple Silicon')
+  const architecture = dependencies.architecture ?? process.arch
+  if (architecture !== 'arm64') throw new Error('Development requires Apple Silicon')
   const environment = dependencies.environment ?? process.env
   const spawnChild = dependencies.spawnChild ?? spawn
   const send = dependencies.send ?? sendToParent
@@ -305,6 +319,9 @@ export async function runDevCommand(mode, dependencies = {}) {
   }
 
   const platform = dependencies.platform ?? process.platform
+  if (platform !== 'darwin') throw new Error('Development requires macOS on Apple Silicon')
+  const architecture = dependencies.architecture ?? process.arch
+  if (architecture !== 'arm64') throw new Error('Development requires Apple Silicon')
   const environment = dependencies.environment ?? process.env
   const spawnChild = dependencies.spawnChild ?? spawn
   const exit = dependencies.exit ?? ((code) => process.exit(code))
@@ -317,13 +334,13 @@ export async function runDevCommand(mode, dependencies = {}) {
   }
   let removeSigint = () => {}
 
-  if (platform === 'darwin') {
+  {
     if (!environment.HOME) {
       throw new Error('HOME is required to locate the dev instance record')
     }
     recordPath = join(
       environment.HOME,
-      'Library/Application Support/io.github.clash-verge-rev.clash-verge-rev.dev/singleton-instance.json',
+      'Library/Application Support/io.github.jackieismpc.clash-verge-native.dev/singleton-instance.json',
     )
     const installSigint = dependencies.installSigint ?? defaultInstallSigint
     removeSigint = installSigint(() => dispatchSigint()) ?? (() => {})
@@ -336,17 +353,14 @@ export async function runDevCommand(mode, dependencies = {}) {
     env: tauriInvocation.env,
     detached: true,
   }
-  const invocation = platform === 'darwin' ? anchorInvocation : tauriInvocation
+  const invocation = anchorInvocation
   let child
   try {
     child = spawnChild(invocation.command, invocation.args, {
-      shell: platform === 'win32',
+      shell: false,
       env: invocation.env,
       detached: invocation.detached,
-      stdio:
-        platform === 'darwin'
-          ? ['inherit', 'inherit', 'inherit', 'ipc']
-          : 'inherit',
+      stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
     })
   } catch (error) {
     removeSigint()
@@ -357,11 +371,6 @@ export async function runDevCommand(mode, dependencies = {}) {
     throw new Error('dev command failed to return a child process')
   }
   const outerLifecycle = childLifecycle(child)
-
-  if (platform !== 'darwin') {
-    mirrorResult(await outerLifecycle.result)
-    return
-  }
 
   let groupState = 'safe'
   let finalKillSent = false
@@ -548,6 +557,14 @@ export async function prepareDevRuntime(mode, dependencies = {}) {
 }
 
 async function run() {
+  if (process.platform !== 'darwin' || process.arch !== 'arm64') {
+    throw new Error('Development requires macOS on Apple Silicon')
+  }
+  const environment = buildTauriInvocation('dev').env
+  for (const name of ['CARGO_HOME', 'CARGO_TARGET_DIR', 'TMPDIR']) {
+    mkdirSync(environment[name], { recursive: true })
+    process.env[name] = environment[name]
+  }
   if (process.argv[2] === '--anchor') {
     await runDevAnchor(process.argv[3])
   } else {

@@ -1,17 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# group_platforms.sh — lock platform entries into platform subsections.
-#
-# Inside every <details> section of Changelog.md, entries whose platform
-# mentions form a set of one or two platforms (Windows/macOS/Linux) are
-# grouped under a bold heading named by that set (e.g. **macOS/Linux**),
-# ordered Windows -> macOS -> Linux. Entries naming all three or none stay
-# in the common area above the headings. Idempotent.
-#
-# usage: group_platforms.sh [--check]
-#   (default) rewrite Changelog.md in place
-#   --check   report misplaced entries without writing; exit 1 if any
+# Group macOS entries in Changelog.md while preserving historical release text.
+# Usage: group_platforms.sh [--check]
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CHANGELOG="$ROOT_DIR/Changelog.md"
@@ -38,22 +29,12 @@ regrouped=$(awk '
     }
   }
 
-  function platform_of(l,   c, key) {
-    c = 0; key = ""
-    if (l ~ /Windows/) { c++; key = key "Windows/" }
-    if (l ~ /macOS/)   { c++; key = key "macOS/" }
-    if (l ~ /Linux/)   { c++; key = key "Linux/" }
-    if (c == 0 || c == 3) return ""
-    sub(/\/$/, "", key)
-    return key
+  function platform_of(l) {
+    return l ~ /macOS/ ? "macOS" : ""
   }
 
-  function heading(kk,   t) {
-    t = kk
-    gsub(/Windows/, "🖥️", t)
-    gsub(/macOS/, "🍎", t)
-    gsub(/Linux/, "🐧", t)
-    return "**" t " " kk "**"
+  function heading(kk) {
+    return "**🍎 " kk "**"
   }
 
   function emit_block(a, b,   k, m, n, x, oi, kk, nkeys, order, count, entries) {
@@ -75,7 +56,7 @@ regrouped=$(awk '
     }
 
     for (x = 1; x <= count[""]; x++) print entries["" SUBSEP x]
-    nkeys = split("Windows macOS Linux Windows/macOS Windows/Linux macOS/Linux", order, " ")
+    nkeys = split("macOS", order, " ")
     for (oi = 1; oi <= nkeys; oi++) {
       kk = order[oi]
       if (!count[kk]) continue

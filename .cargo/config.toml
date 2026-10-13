@@ -1,9 +1,10 @@
-[target.aarch64-unknown-linux-gnu]
-linker = "aarch64-linux-gnu-gcc"
+[build]
+target = "aarch64-apple-darwin"
+target-dir = ".work/target"
 
-[target.armv7-unknown-linux-gnueabihf]
-linker = "arm-linux-gnueabihf-gcc"
+[env]
+MACOSX_DEPLOYMENT_TARGET = "26.0"
 
 [alias]
 clippy-all = "clippy --all-targets --all-features -- -D warnings"
-clippy-only = "clippy --all-targets  --features clippy -- -D warnings"
+clippy-only = "clippy --all-targets --features clippy -- -D warnings"

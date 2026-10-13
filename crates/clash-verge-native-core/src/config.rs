@@ -81,6 +81,14 @@ pub struct Store {
     pub selected_profile_id: Option<String>,
     pub overrides: String,
     pub settings: Settings,
+    #[serde(default)]
+    pub rule_overrides: crate::rules::RuleOverrides,
+    #[serde(default)]
+    pub migration_warnings: Vec<String>,
+    #[serde(default)]
+    pub core_update: Option<Json>,
+    #[serde(default)]
+    pub active_core: Option<PathBuf>,
 }
 
 impl Store {
@@ -95,6 +103,10 @@ impl Store {
                 mixed_port,
                 mode: "rule".into(),
             },
+            rule_overrides: Default::default(),
+            migration_warnings: vec![],
+            core_update: None,
+            active_core: None,
         }
     }
     pub fn validate(&self) -> Result<()> {
@@ -113,6 +125,7 @@ impl Store {
                 bail!("duplicate or empty profile ID");
             }
             parse_profile_yaml(&p.yaml)?;
+            crate::subscriptions::validate_interval(p.update_interval_minutes)?;
             if !["local", "remote"].contains(&p.kind.as_str()) {
                 bail!("invalid profile kind");
             }
@@ -121,6 +134,7 @@ impl Store {
             bail!("selected profile is missing");
         }
         parse_yaml(&self.overrides)?;
+        self.rule_overrides.validate()?;
         Ok(())
     }
     pub fn profile(&self, id: &str) -> Result<&Profile> {
@@ -138,6 +152,7 @@ impl Store {
             None => parse_yaml("proxies: []\nproxy-groups: []\nrules: [\"MATCH,DIRECT\"]\n")?,
         };
         merge(&mut yaml, parse_yaml(&self.overrides)?);
+        self.rule_overrides.apply(&mut yaml)?;
         apply_compatibility(&mut yaml);
         let root = yaml.as_mapping_mut().context("profile root must be a mapping")?;
         // Engine protocol fields are intentionally left intact. Only endpoints and
@@ -174,12 +189,13 @@ impl Store {
     }
     pub fn snapshot(&self, runtime: Json) -> Json {
         let mut data = serde_json::to_value(self).unwrap_or(Json::Null);
+        let interactive = runtime["executionMode"] != "integrationTest";
         data["runtime"] = runtime;
         data["capabilities"] = serde_json::json!({
             "profiles":true,"subscriptions":true,"localOverrides":true,"proxySelection":true,
             "unixController":true,"webSocketStreams":true,"mediaUnlock":true,"localBackup":true,
-            "systemProxy":false,"tun":false,"helper":false,"scriptProfiles":false,
-            "webdavBackup":false,"autoUpdate":false
+            "systemProxy":interactive,"systemDns":interactive,"tun":interactive,"helper":interactive,"scriptProfiles":false,
+            "webdavBackup":false,"autoUpdate":false,"coreUpdate":interactive
         });
         data
     }

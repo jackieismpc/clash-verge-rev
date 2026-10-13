@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import ServiceManagement
 
 struct NativePreferencesView: View {
@@ -7,6 +8,7 @@ struct NativePreferencesView: View {
         TabView {
             GeneralPreferences(model: model).tabItem { Label("通用", systemImage: "gearshape") }
             NetworkPreferences(model: model).tabItem { Label("网络", systemImage: "network") }
+            CoreUpdatePreferences(model: model).tabItem { Label("内核更新", systemImage: "arrow.down.circle") }
             BackupPreferences(model: model).tabItem { Label("本地备份", systemImage: "externaldrive") }
             Form {
                 LabeledContent("应用", value: "Clash Native 0.1.0")
@@ -51,6 +53,9 @@ private struct GeneralPreferences: View {
 private struct NetworkPreferences: View {
     @Bindable var model: AppModel
     @ViewState private var showOverrides = false
+    @ViewState private var dns = ""
+    @ViewState private var helperStatus = SMAppService.daemon(plistName: "io.github.jackieismpc.clash-native.helper.plist").status
+    private var service: SMAppService { SMAppService.daemon(plistName: "io.github.jackieismpc.clash-native.helper.plist") }
     var body: some View {
         Form {
             Section("代理内核") {
@@ -68,11 +73,33 @@ private struct NetworkPreferences: View {
                 }.disabled(model.isDemo)
             }
             Section("系统网络") {
-                LabeledContent("系统代理", value: "权限服务尚未接通")
-                LabeledContent("TUN", value: "权限服务尚未接通")
-                Text("当前内核仅监听独立的本地端口，未修改系统代理、DNS 或路由。")
+                Toggle("系统代理", isOn: Binding(get: { model.snapshot?.networkFeatures.systemProxy == .on }, set: { enabled in
+                    Task { await model.command("setSystemProxy", payload: ["enabled": String(enabled)]) }
+                }))
+                Toggle("TUN 增强模式", isOn: Binding(get: { model.snapshot?.networkFeatures.tun == .on || model.snapshot?.networkFeatures.tun == .failed }, set: { enabled in
+                    Task { await model.command("setTun", payload: ["enabled": String(enabled)]) }
+                }))
+                TextField("系统 DNS（IP 地址，用逗号分隔）", text: $dns)
+                HStack {
+                    Button("应用 DNS") { Task { await model.command("setSystemDNS", payload: ["servers": dns]) } }.disabled(dns.isEmpty)
+                    Button("恢复所属系统代理与 DNS") { Task { await model.command("restoreNetwork") } }
+                }
+                Text("系统代理可能请求管理员授权。退出会恢复仍属于本应用的设置，保留其他应用之后的修改。")
                     .font(.caption).foregroundStyle(.secondary)
-            }
+            }.disabled(model.isDemo || model.isIntegrationTest || model.busy)
+            Section("TUN 权限服务") {
+                Text(helperStatus == .enabled ? "独立服务已获授权" : helperStatus == .requiresApproval ? "等待系统设置中的管理员批准" : "尚未注册独立服务")
+                Text("TUN 需要将应用安装到 /Applications/Clash Native.app，并授予独立服务权限。不会使用现有 Clash Verge 的服务。")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Button("注册权限服务") {
+                        do { try service.register(); helperStatus = service.status } catch { model.report(error) }
+                    }.disabled(Bundle.main.bundleURL.path != "/Applications/Clash Native.app" || helperStatus == .enabled)
+                    Button("打开系统授权设置") { SMAppService.openSystemSettingsLoginItems() }
+                    Button("注销服务") { Task { do { await model.command("setTun", payload: ["enabled": "false"]); if model.failure == nil { try await service.unregister(); helperStatus = service.status } } catch { model.report(error) } } }
+                        .disabled(helperStatus == .notRegistered)
+                }
+            }.disabled(model.isDemo || model.isIntegrationTest || model.busy)
             Section("配置") {
                 Button("高级 YAML 覆写…") { showOverrides = true }.disabled(model.isDemo)
             }
@@ -111,10 +138,26 @@ private struct BackupPreferences: View {
             HStack {
                 Text("本地备份").font(.title2)
                 Spacer()
+                Button("导入旧数据…") {
+                    let panel = NSOpenPanel()
+                    panel.canChooseDirectories = true
+                    panel.canChooseFiles = true
+                    panel.allowsMultipleSelection = false
+                    panel.message = "选择旧 Clash Verge 数据目录或 ZIP 备份。源文件只读保留；自定义 JavaScript 不执行。"
+                    if panel.runModal() == .OK, let url = panel.url {
+                        Task { await model.command("importLegacyData", payload: ["path": url.path]) }
+                    }
+                }.disabled(model.isDemo || model.busy)
                 Button("创建备份") { Task { await model.command("createBackup") } }.disabled(model.isDemo)
             }
-            Text("备份包含本应用的订阅、配置、覆写及设置。恢复会替换当前配置。")
+            Text("原生 JSON 备份包含本应用配置。旧目录或 ZIP 导入先保存私有回退副本；自定义 JavaScript 只保留并提示迁到 YAML。恢复会替换当前配置。")
                 .font(.caption).foregroundStyle(.secondary)
+            if let failure = model.failure {
+                Text(failure.detail).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+            }
+            ForEach(model.snapshot?.migrationWarnings ?? [], id: \.self) { warning in
+                Text(warning).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
+            }
             if model.snapshot?.backups.isEmpty ?? true { emptyState("暂无备份", "创建备份后可在这里恢复。", symbol: "externaldrive") }
             else {
                 List(model.snapshot?.backups ?? []) { backup in
@@ -138,5 +181,45 @@ private struct BackupPreferences: View {
                     restoring = nil
                 }
             }
+    }
+}
+
+
+private struct CoreUpdatePreferences: View {
+    @Bindable var model: AppModel
+    @ViewState private var channel = "stable"
+
+    var body: some View {
+        Form {
+            Section("mihomo 更新") {
+                LabeledContent("固定基线", value: "v1.19.32 · Apple Silicon")
+                Picker("更新通道", selection: $channel) {
+                    Text("稳定版").tag("stable")
+                    Text("Alpha 预览版").tag("alpha")
+                }
+                Button("检查官方版本") { Task { await model.command("checkCoreUpdate", payload: ["channel": channel]) } }
+                Button("下载并验证候选") { Task { await model.command("stageCoreUpdate", payload: ["channel": channel]) } }
+                Text("候选只存入本应用私有目录。验证通过后仍须明确启用；原有固定基线保留用于失败回滚。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("启用已验证候选") {
+                if let update = model.snapshot?.coreUpdate {
+                    LabeledContent("官方版本", value: update.version)
+                    if let path = update.candidatePath {
+                        Text(path).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    }
+                    if update.activated { Text("已启用私有候选").foregroundStyle(.secondary) }
+                } else { Text("请先检查版本并下载候选。 ").foregroundStyle(.secondary) }
+                Button("启用候选并重启所属内核") {
+                    Task { await model.command("activateCoreUpdate", payload: ["candidatePath": model.snapshot?.coreUpdate?.candidatePath ?? ""]) }
+                }.disabled(model.snapshot?.coreUpdate?.candidatePath == nil || model.snapshot?.coreUpdate?.activated == true)
+            }
+            Button("恢复固定基线并重启所属内核") { Task { await model.command("resetCoreUpdate") } }
+            Text("特权 TUN 使用安装包内受签名保护的固定内核。启用 TUN 前，请先恢复固定基线。")
+                .font(.caption).foregroundStyle(.secondary)
+            if let failure = model.failure {
+                Text(failure.detail).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+            }
+        }.formStyle(.grouped).disabled(model.isDemo || model.busy || model.isIntegrationTest)
     }
 }

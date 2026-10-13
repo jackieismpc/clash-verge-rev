@@ -159,6 +159,7 @@ actor NativeCoreTransport: CoreTransport {
     private var backups: [BackupRecord] = []
     private var failure: ClientFailure?
     private var lastProjection = Date.distantPast
+    private var visible = true
 
     init(options: NativeCoreOptions) {
         self.options = options
@@ -183,10 +184,10 @@ actor NativeCoreTransport: CoreTransport {
         if unlock.isEmpty { unlock = try await request("media.list").items.compactMap(unlockRecord) }
         if state["runtime"]["status"].text == "running" {
             if subscribedGeneration != generation {
-                _ = try await request("core.subscribe", args: ["streams": .array(["traffic", "logs", "connections"].map(WireValue.string))])
+                _ = try await request("core.subscribe", args: ["streams": .array((visible ? ["traffic", "logs", "connections"] : ["logs"]).map(WireValue.string))])
                 subscribedGeneration = generation
             }
-            if pending.isEmpty && (projectionGeneration != generation || projectionRevision != revision || Date().timeIntervalSince(lastProjection) >= 5) {
+            if visible && pending.isEmpty && (projectionGeneration != generation || projectionRevision != revision || Date().timeIntervalSince(lastProjection) >= 5) {
                 try await reloadProjection()
             }
         }
@@ -248,6 +249,31 @@ actor NativeCoreTransport: CoreTransport {
         case "listBackups": try await loadBackups()
         case "restoreBackup": _ = try await request("backup.restore", args: ["id": .string(payload["backupID"] ?? "")], id: command.requestID)
         case "setOverrides": _ = try await request("overrides.set", args: ["yaml": .string(payload["yaml"] ?? "{}")], id: command.requestID)
+        case "configureSubscription":
+            guard let interval = UInt64(payload["intervalMinutes"] ?? "") else { throw invalid("更新间隔必须为非负整数") }
+            _ = try await request("subscription.configure", args: ["id": .string(payload["profileID"] ?? ""), "intervalMinutes": .number(Double(interval))], id: command.requestID)
+        case "setRuleOverrides":
+            let rules = ["prepend", "append", "delete"].reduce(into: [String: WireValue]()) { values, key in
+                values[key] = .array((payload[key] ?? "").components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.map(WireValue.string))
+            }
+            _ = try await request("rules.overrides.set", args: rules, id: command.requestID)
+        case "importLegacyData":
+            _ = try await request("legacy.import", args: ["path": .string(payload["path"] ?? "")], id: command.requestID)
+        case "checkCoreUpdate", "stageCoreUpdate":
+            _ = try await request(command.command == "checkCoreUpdate" ? "core.update.check" : "core.update.stage", args: ["channel": .string(payload["channel"] ?? "stable")], id: command.requestID)
+        case "activateCoreUpdate":
+            _ = try await request("core.update.activate", args: ["candidatePath": .string(payload["candidatePath"] ?? "")], id: command.requestID)
+        case "resetCoreUpdate": _ = try await request("core.update.reset", id: command.requestID)
+        case "toggleSystemProxy", "setSystemProxy":
+            let enabled = command.command == "setSystemProxy" ? payload["enabled"] == "true" : state["runtime"]["network"]["systemProxy"].text != "on"
+            _ = try await request("systemProxy.set", args: ["enabled": .bool(enabled)], id: command.requestID)
+        case "toggleTun", "setTun":
+            let enabled = command.command == "setTun" ? payload["enabled"] == "true" : !state["runtime"]["helperMode"].flag
+            _ = try await request("tun.set", args: ["enabled": .bool(enabled)], id: command.requestID)
+        case "setSystemDNS":
+            let values = (payload["servers"] ?? "").split(whereSeparator: { $0 == "," || $0.isWhitespace }).map { WireValue.string(String($0)) }
+            _ = try await request("systemDns.set", args: ["servers": .array(values)], id: command.requestID)
+        case "restoreNetwork": _ = try await request("network.restore", id: command.requestID)
         case "updateProvider":
             guard let provider = providers.first(where: { $0.id == payload["providerID"] }), provider.vehicle.lowercased() != "file" else {
                 throw invalid("该规则源或节点源无法远程更新")
@@ -269,6 +295,12 @@ actor NativeCoreTransport: CoreTransport {
         // Keep the library loaded until every submitted operation has unwound.
         _ = owned
         results.removeAll()
+    }
+    func setVisibility(_ visible: Bool) async {
+        guard self.visible != visible else { return }
+        self.visible = visible
+        subscribedGeneration = nil
+        if visible { projectionRevision = nil }
     }
 
     private func request(_ command: String, args: [String: WireValue] = [:], id: String = UUID().uuidString) async throws -> WireValue {
@@ -330,6 +362,9 @@ actor NativeCoreTransport: CoreTransport {
             selectedNodeID = nil; subscribedGeneration = nil; projectionGeneration = nil
         }
         generation = event.coreGeneration; revision = event.revision; state = data
+        if data["runtime"]["status"].text != "running" {
+            connections.removeAll(); subscribedGeneration = nil; projectionGeneration = nil
+        }
         if let error = data["runtime"]["error"].text { failure = ClientFailure(code: "core_failed", message: "内核需要修复", detail: error, retryable: true) }
     }
 
@@ -346,6 +381,7 @@ actor NativeCoreTransport: CoreTransport {
         case "delay": applyDelay(value)
         case "media": applyUnlock(value)
         case "connections": connections = value["connections"].items.compactMap(connectionRecord)
+        case "streamStatus": if value["connected"].flag && (failure?.code == "streamFailed" || failure?.code == "stream_failed") { failure = nil }
         default: break
         }
     }
@@ -420,11 +456,18 @@ actor NativeCoreTransport: CoreTransport {
         let selected = state["selectedProfileId"].text
         let profiles = state["profiles"].items.compactMap { value -> ProfileRecord? in
             guard let id = value["id"].text else { return nil }
-            return ProfileRecord(id: id, name: value["name"].text ?? "", source: value["url"].text ?? "本地 YAML", active: id == selected, updatedAt: value["updatedAt"].number)
+            return ProfileRecord(id: id, name: value["name"].text ?? "", source: value["url"].text ?? "本地 YAML", active: id == selected, updatedAt: value["updatedAt"].number, updateIntervalMinutes: value["updateIntervalMinutes"].number.map(Int.init))
         }
         var result = CoreSnapshot(generation: generation, sequence: sequence, mode: state["settings"]["mode"].text ?? "rule", coreStatus: state["runtime"]["status"].text ?? "stopped", selectedNodeID: selectedNodeID, nodes: nodes, profiles: profiles, rules: rules, connections: connections, logs: logs, traffic: traffic, error: failure)
         result.unlock = unlock; result.backups = backups; result.overrides = state["overrides"].text ?? "{}"
         result.providers = providers
+        result.ruleOverrides = RuleOverrideRecord(prepend: state["ruleOverrides"]["prepend"].items.compactMap(\.text), append: state["ruleOverrides"]["append"].items.compactMap(\.text), delete: state["ruleOverrides"]["delete"].items.compactMap(\.text))
+        result.migrationWarnings = state["migrationWarnings"].items.compactMap(\.text)
+        if let version = state["coreUpdate"]["version"].text {
+            result.coreUpdate = CoreUpdateRecord(channel: state["coreUpdate"]["channel"].text ?? "stable", version: version, candidatePath: state["coreUpdate"]["candidatePath"].text, activated: state["coreUpdate"]["activated"].flag)
+        }
+        let network = state["runtime"]["network"]
+        result.networkFeatures = NetworkFeatures(systemProxy: isIntegrationTest ? .unavailable : NetworkFeatureStatus(rawValue: network["systemProxy"].text ?? "off") ?? .failed, tun: isIntegrationTest ? .unavailable : NetworkFeatureStatus(rawValue: network["tun"].text ?? "off") ?? .failed, dns: NetworkFeatureStatus(rawValue: network["dns"].text ?? "off") ?? .failed)
         result.profileDocuments = Dictionary(uniqueKeysWithValues: state["profiles"].items.compactMap { value in
             guard let id = value["id"].text, let yaml = value["yaml"].text else { return nil }; return (id, yaml)
         })

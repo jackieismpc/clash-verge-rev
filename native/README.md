@@ -1,19 +1,17 @@
 # Native macOS presentation
 
-This Swift package is the independently maintained native presentation layer.
-It targets Apple Silicon and macOS 26 or later. The default transport loads the
-bundled Rust business library and uses a project-local development data directory,
-controller socket and port. The core starts only after an explicit action. It
-never changes OS proxy, DNS or TUN settings in this stage. `--demo` selects the
-clearly labelled visual fixture instead.
+SwiftUI is the only presentation, targeting Apple Silicon and macOS 26+.
+The default transport loads the bundled Rust business library and uses project-local
+data and an independent loopback port/socket. The core starts through an explicit
+action; OS proxy/DNS/TUN require separate explicit controls. `--demo` selects
+clearly labelled visual data instead. No legacy UI or Node toolchain remains.
 
 ## Build and run
 
-From the repository root, using the installed Command Line Tools (Swift 6.2+):
+From the repository root with installed Rust and Swift 6.2+:
 
 ```sh
 scripts/native-core-assets.sh
-scripts/native-core-build.sh build
 scripts/native-ui-build.sh
 open '.work/native-ui/Clash Native.app'
 scripts/native-ui-test.sh
@@ -21,117 +19,79 @@ scripts/native-ui-test.sh
 open -n '.work/native-ui/Clash Native.app' --args --demo
 ```
 
-The scripts scope temporary files, SwiftPM configuration, caches, and generated
-app bundles to `.work/native-ui`. Rust outputs and the verified pinned mihomo
-archive live in `.work/target` and `.work/engines`; they are never Git inputs. The bundle receives an ad-hoc local code
-signature; distribution signing and notarization are separate release tasks.
-No global Swift, Cargo, Xcode, shell, or proxy configuration is modified.
-Native build/test scripts use installed Rust and Swift plus system shell/codesign
-utilities. `clash-verge-build-tools` replaces the Node asset downloader with HTTPS,
-SHA256 verification, arm64 Mach-O validation and bounded gzip extraction. Offline
-mode fails closed on missing/corrupt archives and preserves the previous core.
-The mihomo stable/alpha update chain lives in the Rust build tool. Explicit
-`--check-core-update` and `--stage-core-update` prepare private candidates without
-activating them or changing the pinned baseline. No legacy shell remains.
+Outputs and caches stay in `.work`. Bundles default to release optimization with
+local ad-hoc signatures; `NATIVE_BUILD_PROFILE=debug` selects debugging. Scripts
+use existing tools and do not change global Xcode/Cargo/shell settings. Asset tools
+validate HTTPS downloads, SHA256 and arm64 Mach-O; offline failures preserve the
+previous core. The stable/alpha update library is shared by the UI and CLI.
+Settings can stage/activate a private candidate or restore the pinned baseline;
+TUN uses only the installed root-owned signed bundled core.
 
-SDK 27 introduces a SwiftUI `State` macro whose plugin is absent from the current
-Command Line Tools distribution. `ViewState<Value>` explicitly aliases the
-stable SwiftUI property wrapper so a full Xcode installation is not required.
+SDK 27 also exposes a State macro absent from Command Line Tools. `ViewState`
+explicitly aliases the stable SwiftUI property wrapper, so full Xcode is not required.
 
-## Presentation
+## Presentation and behavior
 
-The default window is 1280 × 820 points and its minimum is 980 × 680. The native
-split sidebar is 224 points by default, adjustable between 208 and 256. Content
-uses 24-point margins, 16-point gaps, and raised 20-point-radius cards with
-20-point padding. System navigation and toolbar controls use Liquid Glass;
-content cards remain opaque. Settings follow system colors, contrast, reduced
-transparency, and reduced motion, with an app-only light/dark override.
+The main window is 1280 × 820, minimum 980 × 680, sidebar 208–256 (default 224).
+Content uses 24-point margins, 16-point gaps, and 20-point card radius/padding.
+Navigation and controls use Liquid Glass; content surfaces retain readable contrast.
+System colors, appearance, reduced motion/transparency and increased contrast apply.
 
-The six pages are overview, profiles, nodes, rules, activity, and media unlock
-checks. The overview uses a 2:1:1 latency/upload/download row, then connections
-and a five-minute, one-Hertz traffic chart. Missing values or intervals above
-1.8 seconds start a new chart segment. Only core-provided metrics are represented;
-there are no invented application, router/DNS, or day/month totals.
+Six pages cover overview, profiles, nodes, rules, activity and media unlock.
+The overview uses a 2:1:1 latency/upload/download row, connection summary and
+five-minute traffic chart. Missing samples create gaps; no synthetic totals appear.
+Nodes use a searchable/sortable native Table; double-click or Return selects a node.
+⌘O imports, ⌘R refreshes. URI parsing and subscription download belong to Rust.
 
-Nodes use a native searchable and sortable `Table`. A single click inspects;
-double-click, Return, or the explicit use action sends a selection command.
-`⌘O` opens the import sheet and `⌘R` refreshes. The sheet accepts YAML text or an
-HTTP/HTTPS subscription address, or a supported node share link. Custom JavaScript
-is rejected with a migration hint; imported files remain unchanged. Demo import only appends a labelled in-memory
-sample; parsing and remote download belong to the Rust transport.
+Rules show providers, remote updates, persistent prepend/append/delete rules and
+advanced YAML overrides. Activity exposes connection details/close and log filters,
+search/pause; buffers remain bounded. Latency progress uses request IDs and shared
+Rust concurrency slots; stale batches cannot replace current results.
 
-Rules include the engine's provider list and update actions, plus a persistent
-YAML override editor. Activity includes connection detail, close actions, log
-level/search filters and pause/resume of display; pausing retains a bounded copy
-while transport logging continues. Latency progress uses request IDs so an old
-batch cannot count toward a new test. System proxy/TUN controls remain disabled
-in the real transport until their Mac adapters are implemented.
+Subscriptions update in the background (default 1440 minutes, 0 disables), with
+bounded retries and stale-ticket cancellation. Legacy directory/ZIP import saves
+original copies and reports unsupported JS/YAML overlays; scripts never execute.
+Settings contains native backup restore, update candidates and network controls.
 
-Anonymous visual fixtures can be selected without modifying system preferences:
+Hidden windows unsubscribe metrics and stop projection refresh; bounded logs and
+Rust subscription scheduling continue. WebSocket streams reconnect with bounded
+backoff. Closing the window preserves the menu bar; quit joins owned tasks, stops
+the owned core and restores still-owned network fields.
+
+## Platform setup
+
+SystemConfiguration uses explicit Authorization Services rights. TUN uses the
+independent authenticated SMAppService root helper; integration mode forbids all
+OS mutations before framework/IPC calls. Build, then manually run:
+
+```sh
+sudo scripts/install-local.sh
+open '/Applications/Clash Native.app'
+```
+
+Register the helper from Settings → Network and approve it in System Settings.
+The installed bundle must be root-owned and non-writable to other users. Installation
+alone does not register services or modify networking. Quit before updating an
+installation; reopen both application and service after replacement. Login startup
+uses SMAppService only when its toggle changes. Read the root README for test limits.
+
+## Transport and validation
+
+Codable/Sendable models project the versioned JSON C ABI. AppModel applies only
+supported schema and monotonically ordered `(generation, sequence)` snapshots.
+Rust serializes mutations and rejects stale generation/revision requests. Consumers
+free buffers and destroy the runtime only after ordered shutdown.
+`CVN_LIBRARY_PATH`, `CVN_MIHOMO_PATH`, `CVN_DATA_DIRECTORY` select development inputs.
+
+Swift tests exercise real isolated Swift → Rust → mihomo lifecycle, import, providers,
+selection, rules, backups, reopen and snapshot ordering. Rust tests cover automatic
+updates/rule retention, legacy ZIP imports, corrupt backups, update rollback, stream
+reconnection, bounded logs and mocked field ownership restoration. Actual Mac
+proxy/DNS/TUN/helper installation and OS writes are skipped by user request;
+simulation does not prove them. Real-node evidence and remaining acceptance work
+are tracked only in MIGRATION.md. Existing visual fixtures remain available:
 
 ```sh
 open -n '.work/native-ui/Clash Native.app' --args --demo --appearance=dark
 open -n '.work/native-ui/Clash Native.app' --args --demo --page=nodes --scenario=largeList --minimum-window
-open -n '.work/native-ui/Clash Native.app' --args --demo --page=rules --rules=providers
 ```
-
-Other `--scenario` values are `empty`, `error`, `loading`, `networkApplying`,
-`networkFailed` and `networkOn`. These are fixture states, not real network modes.
-
-## Transport boundary
-
-`TransportModels.swift` defines Codable, Sendable presentation records and the
-`CoreTransport` protocol. `AppModel` runs on the main actor and applies snapshots
-only when the schema is supported and `(generation, sequence)` is no older than
-the current state. Transport implementation and command ordering belong to Rust.
-All UI commands carry a request ID and an expected core generation.
-
-UI command names and payloads:
-
-| Command | Payload |
-| --- | --- |
-| `refresh` | empty |
-| `selectNode` | `nodeID` |
-| `importProfile` | `name`, `source`, and `yaml` or `url` |
-| `selectProfile` | `profileID` |
-| `setMode` | `mode` |
-| `startCore`, `stopCore` | empty |
-| `closeConnection` | `connectionID` |
-| `clearLogs` | empty; clear the current UI log buffer |
-| `checkMedia` | `service` |
-
-`NativeCoreTransport.swift` loads the versioned C ABI on its actor executor, frees
-returned buffers, drains ordered events and projects runtime/controller data.
-Rust serializes writes. Swift preserves distinct commands instead of dropping
-new intents behind a global busy flag. Snapshots coalesce ordinary refreshes.
-Quit waits for pending operations and owned core cleanup; closing the window
-keeps the core and menu bar alive. `CVN_LIBRARY_PATH`, `CVN_MIHOMO_PATH` and
-`CVN_DATA_DIRECTORY` can select isolated development inputs per child process.
-
-Subscriptions support URL/YAML/file import, update, selection, editing and
-delete. Nodes support individual and batch tests, cancellation and stable row
-ordering during tests. The single shared Rust scheduler bounds tests to eight
-requests, with no random or minimum slot delay. Late results are rejected after
-core generation or configuration revision changes. The original media checker
-list is used for individual and bounded parallel whole-list checks, with normal
-TLS verification. Native JSON backups can be listed, created and restored.
-
-Network settings currently expose core start/stop/mode and persistent YAML
-overrides. System proxy/TUN/helper remain explicitly unavailable pending their
-Mac adapter. Old ZIP backup import and subscription schedules are unfinished.
-Login startup uses `SMAppService` only when the user changes its toggle;
-registration, distribution signing and notarization require product validation.
-
-## Validation
-
-Swift tests verify snapshot generation/sequence ordering and schema rejection,
-missing-sample chart segments, unavailable-node and stale-command rejection, and
-JSON round trips. Native accessibility and visual inspection cover the overview,
-table single-click/double-click behavior, search empty state, and demo import.
-A real Swift → C ABI → Rust → pinned arm64 mihomo integration test validates
-YAML import, lifecycle, groups containing spaces, node selection, rules, backup
-restore and persistence after reopen. Integration uses temporary project-local
-data and an ephemeral loopback port. OS proxy/TUN/helper and legacy migration
-workflows remain unvalidated. AppKit content bitmap exports cannot represent
-composited glass/sidebars, so they are not treated as final visual acceptance.
-Review the runnable native window for materials and accessibility.

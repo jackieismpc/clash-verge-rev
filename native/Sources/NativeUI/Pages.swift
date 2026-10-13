@@ -100,6 +100,7 @@ struct ProfilesView: View {
     @Bindable var model: AppModel
     @ViewState private var editing: ProfileRecord?
     @ViewState private var removing: ProfileRecord?
+    @ViewState private var scheduling: ProfileRecord?
     @ViewState private var importFile = false
     private var profiles: [ProfileRecord] {
         (model.snapshot?.profiles ?? []).filter { model.query.isEmpty || $0.name.localizedCaseInsensitiveContains(model.query) }
@@ -131,6 +132,8 @@ struct ProfilesView: View {
                             else { Button("使用") { Task { await model.command("selectProfile", payload: ["profileID": profile.id]) } }.disabled(model.busy) }
                             Menu {
                                 Button("编辑…") { editing = profile }
+                                Button("自动更新间隔…") { scheduling = profile }
+                                    .disabled(!profile.source.hasPrefix("http") || model.isDemo)
                                 Button("更新订阅") { Task { await model.command("updateProfile", payload: ["profileID": profile.id]) } }
                                     .disabled(!profile.source.hasPrefix("http") || model.isDemo)
                                 Divider()
@@ -142,6 +145,7 @@ struct ProfilesView: View {
             }.padding(24)
         }
         .sheet(item: $editing) { profile in ProfileEditor(model: model, profile: profile) }
+        .sheet(item: $scheduling) { profile in SubscriptionScheduleEditor(model: model, profile: profile) }
         .confirmationDialog("删除配置“\(removing?.name ?? "")”？", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } })) {
             Button("删除", role: .destructive) {
                 if let profile = removing { Task { await model.command("deleteProfile", payload: ["profileID": profile.id]) } }
@@ -176,7 +180,7 @@ struct RulesView: View {
             HStack {
                 pageHeader("规则", subtitle: "按实际生效顺序展示，覆写独立保存。")
                 Spacer()
-                Button("本地覆写…") { showOverrides = true }
+                Button("本地规则覆盖…") { showOverrides = true }
             }
             Picker("规则内容", selection: $segment) {
                 Text("生效规则").tag("rules")
@@ -191,7 +195,7 @@ struct RulesView: View {
                     TableColumn("目标", value: \.target).width(min: 120, ideal: 160)
                 }
             }
-        }.padding(24).sheet(isPresented: $showOverrides) { OverridesEditor(model: model) }
+        }.padding(24).sheet(isPresented: $showOverrides) { LocalRuleEditor(model: model) }
             .onAppear { if model.isDemo && CommandLine.arguments.contains("--rules=providers") { segment = "providers" } }
     }
 }

@@ -24,6 +24,8 @@ pub struct Controller {
     client: reqwest::Client,
     pub child: Option<Child>,
     pub streams: Vec<JoinHandle<()>>,
+    retired_streams: Vec<JoinHandle<()>>,
+    log_tasks: Vec<JoinHandle<()>>,
     pub(crate) read_tasks: Vec<(Arc<Cancellation>, JoinHandle<()>)>,
     delay_slots: Arc<tokio::sync::Semaphore>,
     pub(crate) integration_test: bool,
@@ -42,6 +44,8 @@ impl Controller {
             client,
             child: None,
             streams: vec![],
+            retired_streams: vec![],
+            log_tasks: vec![],
             read_tasks: vec![],
             delay_slots: Arc::new(tokio::sync::Semaphore::new(8)),
             integration_test: false,
@@ -55,6 +59,8 @@ impl Controller {
             client: self.client.clone(),
             child: None,
             streams: vec![],
+            retired_streams: vec![],
+            log_tasks: vec![],
             read_tasks: vec![],
             delay_slots: Arc::clone(&self.delay_slots),
             integration_test: self.integration_test,
@@ -121,24 +127,28 @@ impl Controller {
         if tokio::fs::try_exists(&self.socket).await? {
             bail!("owned controller path is already occupied");
         }
-        use std::os::unix::fs::OpenOptionsExt;
-        let output = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(log)?;
-        self.child = Some(
-            owned_command(binary, home, self.integration_test)
-                .arg("-d")
-                .arg(home)
-                .arg("-f")
-                .arg(config)
-                .stdin(Stdio::null())
-                .stdout(output.try_clone()?)
-                .stderr(output)
-                .kill_on_drop(true)
-                .spawn()?,
-        );
+        let writer = Arc::new(std::sync::Mutex::new(Some(crate::logs::RotatingLog::open(
+            log,
+            2 * 1024 * 1024,
+            3,
+        )?)));
+        let mut child = owned_command(binary, home, self.integration_test)
+            .arg("-d")
+            .arg(home)
+            .arg("-f")
+            .arg(config)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+        if let Some(stdout) = child.stdout.take() {
+            self.log_tasks.push(capture_log(stdout, Arc::clone(&writer)));
+        }
+        if let Some(stderr) = child.stderr.take() {
+            self.log_tasks.push(capture_log(stderr, writer));
+        }
+        self.child = Some(child);
         let pid = self
             .child
             .as_ref()
@@ -170,6 +180,9 @@ impl Controller {
 
     pub async fn stop(&mut self) -> Result<()> {
         self.unsubscribe();
+        for task in self.retired_streams.drain(..) {
+            let _ = task.await;
+        }
         for (cancel, _) in &self.read_tasks {
             cancel.cancel();
         }
@@ -183,6 +196,12 @@ impl Controller {
             child.wait().await?;
             // Retain process ownership until termination is confirmed.
             self.child = None;
+            for mut task in self.log_tasks.drain(..) {
+                if tokio::time::timeout(Duration::from_secs(2), &mut task).await.is_err() {
+                    task.abort();
+                    let _ = task.await;
+                }
+            }
             if let Err(error) = tokio::fs::remove_file(&self.socket).await
                 && error.kind() != std::io::ErrorKind::NotFound
             {
@@ -195,7 +214,9 @@ impl Controller {
     pub fn unsubscribe(&mut self) {
         for task in self.streams.drain(..) {
             task.abort();
+            self.retired_streams.push(task);
         }
+        self.retired_streams.retain(|task| !task.is_finished());
     }
 
     pub fn subscribe<F>(&mut self, names: &[String], generation: u64, publish: F) -> Result<()>
@@ -219,32 +240,72 @@ impl Controller {
                 } else {
                     "?interval=1000"
                 };
-                let outcome = async {
-                    let stream = UnixStream::connect(socket).await?;
-                    let mut request = format!("ws://localhost/{name}{query}").into_client_request()?;
-                    request
-                        .headers_mut()
-                        .insert("authorization", HeaderValue::from_str(&format!("Bearer {secret}"))?);
-                    let (mut ws, _) = client_async(request, stream).await?;
-                    while let Some(message) = ws.next().await {
-                        match message? {
-                            Message::Text(text) => publish(generation, &name, Ok(serde_json::from_str(&text)?)),
-                            Message::Binary(bytes) => publish(generation, &name, Ok(serde_json::from_slice(&bytes)?)),
-                            Message::Ping(bytes) => ws.send(Message::Pong(bytes)).await?,
-                            Message::Close(_) => break,
-                            _ => {}
+                let mut backoff = Duration::from_millis(250);
+                loop {
+                    let outcome: Result<()> = async {
+                        let stream = tokio::time::timeout(Duration::from_secs(5), UnixStream::connect(&socket))
+                            .await
+                            .context("Stream connect timed out")??;
+                        let mut request = format!("ws://localhost/{name}{query}").into_client_request()?;
+                        request
+                            .headers_mut()
+                            .insert("authorization", HeaderValue::from_str(&format!("Bearer {secret}"))?);
+                        let (mut ws, _) = tokio::time::timeout(Duration::from_secs(5), client_async(request, stream))
+                            .await
+                            .context("Stream handshake timed out")??;
+                        publish(generation, "streamStatus", Ok(json!({"stream":name,"connected":true})));
+                        loop {
+                            let message = tokio::time::timeout(Duration::from_secs(45), ws.next())
+                                .await
+                                .context("Stream idle timeout")?
+                                .context("Stream disconnected")??;
+                            match message {
+                                Message::Text(text) => publish(generation, &name, Ok(serde_json::from_str(&text)?)),
+                                Message::Binary(bytes) => {
+                                    publish(generation, &name, Ok(serde_json::from_slice(&bytes)?))
+                                }
+                                Message::Ping(bytes) => {
+                                    tokio::time::timeout(Duration::from_secs(5), ws.send(Message::Pong(bytes)))
+                                        .await
+                                        .context("Stream pong timed out")??;
+                                }
+                                Message::Close(_) => bail!("Stream closed"),
+                                _ => {}
+                            }
                         }
                     }
-                    Ok::<_, anyhow::Error>(())
-                }
-                .await;
-                if let Err(error) = outcome {
-                    publish(generation, &name, Err(error));
+                    .await;
+                    if let Err(error) = outcome {
+                        publish(generation, &name, Err(error));
+                    }
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(8));
                 }
             }));
         }
         Ok(())
     }
+}
+
+fn capture_log<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
+    mut pipe: R,
+    writer: Arc<std::sync::Mutex<Option<crate::logs::RotatingLog>>>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut buffer = [0u8; 8192];
+        while let Ok(count) = pipe.read(&mut buffer).await {
+            if count == 0 {
+                break;
+            }
+            // Drain even after a filesystem failure so the child cannot block on its pipe.
+            if let Ok(mut log) = writer.lock()
+                && log.as_mut().is_some_and(|log| log.write(&buffer[..count]).is_err())
+            {
+                *log = None;
+            }
+        }
+    })
 }
 
 fn owned_command(binary: &Path, home: &Path, integration_test: bool) -> Command {
@@ -304,4 +365,48 @@ pub fn percent_encode(text: &str) -> String {
 pub fn stopped(owner: &str, generation: u64, socket: &Path, port: u16) -> Value {
     json!({"status":"stopped","ownerId":owner,"coreGeneration":generation,
         "socketPath":socket,"mixedPort":port,"pid":null})
+}
+
+#[cfg(test)]
+mod reconnect_tests {
+    use super::*;
+    #[tokio::test]
+    async fn unix_stream_reconnects_after_close_and_stop_reaps_tasks() -> Result<()> {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.work/stream-tests");
+        tokio::fs::create_dir_all(&root).await?;
+        let root = root.canonicalize()?;
+        let socket = root.join(format!(
+            "{}.sock",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        let listener = tokio::net::UnixListener::bind(&socket)?;
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await?;
+                let mut ws = tokio_tungstenite::accept_async(stream).await?;
+                ws.send(Message::Text("{\"up\":1,\"down\":2}".into())).await?;
+                ws.close(None).await?;
+            }
+            Ok::<(), anyhow::Error>(())
+        });
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut controller = Controller::new(socket.clone(), "fixture-secret".into())?;
+        controller.subscribe(&["traffic".into()], 7, move |generation, name, result| {
+            if name == "streamStatus" && result.is_ok() {
+                let _ = tx.send(generation);
+            }
+        })?;
+        for _ in 0..2 {
+            assert_eq!(tokio::time::timeout(Duration::from_secs(3), rx.recv()).await?, Some(7));
+        }
+        controller.stop().await?;
+        assert!(controller.streams.is_empty());
+        assert!(controller.retired_streams.is_empty());
+        assert!(controller.log_tasks.is_empty());
+        tokio::time::timeout(Duration::from_secs(3), server).await???;
+        tokio::fs::remove_file(socket).await?;
+        Ok(())
+    }
 }

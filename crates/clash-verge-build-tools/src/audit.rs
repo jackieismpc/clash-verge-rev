@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use std::{path::Path, process::Command};
+use std::{io::Read, path::Path, process::Command};
 
 fn allowed(path: &Path) -> bool {
     let components: Vec<_> = path.iter().filter_map(|p| p.to_str()).collect();
@@ -35,10 +35,25 @@ fn allowed(path: &Path) -> bool {
     {
         return false;
     }
+    if extension == "json" && path != Path::new("resources/core-artifacts.json") && !components.contains(&"fixtures") {
+        return false;
+    }
     if ["yaml", "yml"].contains(&extension.as_str()) && !components.contains(&"fixtures") {
         return false;
     }
     true
+}
+fn executable_magic(bytes: [u8; 4]) -> bool {
+    matches!(
+        bytes,
+        [0xcf, 0xfa, 0xed, 0xfe]
+            | [0xfe, 0xed, 0xfa, 0xcf]
+            | [0xce, 0xfa, 0xed, 0xfe]
+            | [0xfe, 0xed, 0xfa, 0xce]
+            | [0xca, 0xfe, 0xba, 0xbe]
+            | [0xbe, 0xba, 0xfe, 0xca]
+            | [0x7f, b'E', b'L', b'F']
+    ) || bytes[..2] == *b"MZ"
 }
 
 pub fn check(root: &Path) -> Result<()> {
@@ -57,6 +72,12 @@ pub fn check(root: &Path) -> Result<()> {
                 path.display()
             );
         }
+        if root.join(path).is_file() {
+            let mut magic = [0; 4];
+            if std::fs::File::open(root.join(path))?.read(&mut magic)? == 4 && executable_magic(magic) {
+                bail!("generated executable must not enter Git: {}", path.display());
+            }
+        }
     }
     let lock = std::fs::read_to_string(root.join("Cargo.lock"))?;
     if lock
@@ -73,6 +94,13 @@ pub fn check(root: &Path) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn executable_inputs_are_rejected_by_content() {
+        assert!(executable_magic([0xcf, 0xfa, 0xed, 0xfe]));
+        assert!(executable_magic(*b"\x7fELF"));
+        assert!(!executable_magic(*b"icns"));
+        assert!(!executable_magic(*b"use "));
+    }
+    #[test]
     fn staged_private_artifacts_and_retired_sources_are_rejected() {
         for path in [
             ".work/integration/run/profile.yaml",
@@ -84,6 +112,8 @@ mod tests {
             "package.json",
             "profiles/private.yaml",
             "logs/run.log",
+            "state.json",
+            "logs/events.private.json",
             "out/Native.app/Contents/Info.plist",
         ] {
             assert!(!allowed(Path::new(path)), "invalid input accepted: {path}");

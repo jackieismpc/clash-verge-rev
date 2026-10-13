@@ -3,6 +3,8 @@ members = [
   "crates/clash-verge-native-core",
   "crates/clash-verge-build-tools",
   "crates/clash-verge-media-unlock",
+  "crates/clash-verge-core-update",
+  "crates/clash-verge-native-helper",
 ]
 default-members = ["crates/clash-verge-native-core", "crates/clash-verge-build-tools"]
 resolver = "2"
@@ -29,6 +31,7 @@ lto = false
 rpath = false
 
 [workspace.dependencies]
+clash-verge-core-update = { path = "crates/clash-verge-core-update" }
 clash-verge-media-unlock = { path = "crates/clash-verge-media-unlock" }
 anyhow = "1.0.104"
 chrono = "0.4.45"

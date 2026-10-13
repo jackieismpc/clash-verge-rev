@@ -396,12 +396,15 @@ async fn unix_http_reload_rolls_back_after_persistence_failure() {
         shutdown: Notify::new(),
     });
     let mut worker = Worker {
+        network: network::NetworkSession::new(&dir.0, ExecutionMode::Interactive).unwrap(),
         options: dir.options(),
         store,
         runtime_state,
         controller: Controller::new(socket, "secret".into()).unwrap(),
         secret: "secret".into(),
         shared,
+        scheduler: Scheduler::default(),
+        subscription: None,
     };
     std::fs::create_dir(dir.0.join("state.pending")).unwrap();
     let mut candidate = worker.store.clone();
@@ -495,12 +498,15 @@ async fn delay_batch_runs_concurrently_and_publishes_each_result() {
         shutdown: Notify::new(),
     });
     let mut worker = Worker {
+        network: network::NetworkSession::new(&dir.0, ExecutionMode::Interactive).unwrap(),
         options: dir.options(),
         store,
         runtime_state,
         controller: Controller::new(socket, "secret".into()).unwrap(),
         secret: "secret".into(),
         shared: Arc::clone(&shared),
+        scheduler: Scheduler::default(),
+        subscription: None,
     };
     let names: Vec<String> = (0..6).map(|index| format!("{index} node")).collect();
     let request = request(
@@ -558,12 +564,15 @@ async fn slow_delay_does_not_block_snapshot_or_owned_stop() {
         shutdown: Notify::new(),
     });
     let mut worker = Worker {
+        network: network::NetworkSession::new(&dir.0, ExecutionMode::Interactive).unwrap(),
         options: dir.options(),
         store,
         runtime_state,
         controller: Controller::new(socket, "secret".into()).unwrap(),
         secret: "secret".into(),
         shared: Arc::clone(&shared),
+        scheduler: Scheduler::default(),
+        subscription: None,
     };
     let (sender, receiver) = mpsc::channel(8);
     let owner = tokio::spawn(async move { worker.serve(receiver).await });
@@ -628,4 +637,234 @@ async fn slow_delay_does_not_block_snapshot_or_owned_stop() {
         .await
         .unwrap()
         .unwrap();
+}
+
+#[test]
+fn scheduled_subscription_preserves_local_rules_and_can_be_disabled() {
+    use std::io::Read;
+    let dir = TestDir::new();
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let url = format!("http://{}/subscription", listener.local_addr().unwrap());
+    let mut store = Store::new(19882);
+    store.profiles.push(Profile {
+        id: "remote".into(),
+        name: "fixture".into(),
+        kind: "remote".into(),
+        url: Some(url),
+        updated_at: 1,
+        subscription_info: None,
+        update_interval_minutes: Some(1),
+        home: None,
+        selected_nodes: BTreeMap::new(),
+        yaml: "proxies: []\nrules: [MATCH,DIRECT]\n".into(),
+    });
+    store.selected_profile_id = Some("remote".into());
+    std::fs::write(dir.0.join("state.json"), serde_json::to_vec(&store).unwrap()).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut request = [0; 4096];
+        let _ = socket.read(&mut request).unwrap();
+        let yaml = "proxies: []\nrules: [\"DOMAIN,remote.example,DIRECT\",\"MATCH,DIRECT\"]\n";
+        write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nProfile-Update-Interval: 999999999\r\nConnection: close\r\n\r\n{yaml}", yaml.len()).unwrap();
+    });
+    let client = Client::open(dir.options()).unwrap();
+    assert_eq!(
+        client.submit(request(
+            "rules",
+            "rules.overrides.set",
+            json!({"prepend":["DOMAIN,local.example,REJECT"],"append":[],"delete":[]})
+        )),
+        0
+    );
+    assert_eq!(result(&client, "rules")["ok"], true);
+    let deadline = std::time::Instant::now() + Duration::from_secs(6);
+    while client.snapshot()["data"]["profiles"][0]["updatedAt"] == 1 {
+        assert!(std::time::Instant::now() < deadline, "scheduled update not committed");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    server.join().unwrap();
+    let current = client.snapshot()["data"].clone();
+    assert!(
+        current["profiles"][0]["yaml"]
+            .as_str()
+            .unwrap()
+            .contains("remote.example")
+    );
+    assert_eq!(current["profiles"][0]["updateIntervalMinutes"], 1);
+    assert_eq!(current["ruleOverrides"]["prepend"][0], "DOMAIN,local.example,REJECT");
+    assert_eq!(
+        client.submit(request(
+            "disable",
+            "subscription.configure",
+            json!({"id":"remote","intervalMinutes":0})
+        )),
+        0
+    );
+    assert_eq!(result(&client, "disable")["ok"], true);
+    drop(client);
+    let client = Client::open(dir.options()).unwrap();
+    assert_eq!(client.snapshot()["data"]["profiles"][0]["updateIntervalMinutes"], 0);
+    assert_eq!(client.snapshot()["data"]["ruleOverrides"], current["ruleOverrides"]);
+}
+
+#[test]
+fn legacy_zip_import_and_corrupt_backup_leave_original_data_intact() {
+    let dir = TestDir::new();
+    let zip_path = dir.0.join("legacy.zip");
+    let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for (name, bytes) in [
+        (
+            "profiles.yaml",
+            "current: old\nitems:\n  - {uid: old, name: Original, file: old.yaml, type: local}\n  - {uid: script, file: custom.js, type: script}\n",
+        ),
+        ("profiles/old.yaml", "proxies: []\nrules: [\"MATCH,DIRECT\"]\n"),
+        ("profiles/custom.js", "throw new Error('must never execute');"),
+    ] {
+        archive.start_file(name, options).unwrap();
+        archive.write_all(bytes.as_bytes()).unwrap();
+    }
+    let original = archive.finish().unwrap().into_inner();
+    std::fs::write(&zip_path, &original).unwrap();
+    let client = Client::open(dir.options()).unwrap();
+    assert_eq!(
+        client.submit(request("legacy", "legacy.import", json!({"path":zip_path}))),
+        0
+    );
+    let event = result(&client, "legacy");
+    assert_eq!(event["ok"], true, "{event}");
+    let before = client.snapshot();
+    assert_eq!(before["data"]["selectedProfileId"], "old");
+    assert_eq!(before["data"]["profiles"][0]["name"], "Original");
+    assert_eq!(before["data"]["migrationWarnings"].as_array().unwrap().len(), 1);
+    assert_eq!(std::fs::read(&zip_path).unwrap(), original);
+    assert_eq!(
+        client.submit(request("duplicate", "legacy.import", json!({"path":zip_path}))),
+        0
+    );
+    assert_eq!(result(&client, "duplicate")["ok"], false);
+    assert_eq!(client.snapshot()["data"]["revision"], before["data"]["revision"]);
+    std::fs::create_dir_all(dir.0.join("backups")).unwrap();
+    std::fs::write(dir.0.join("backups/broken.json"), "{invalid").unwrap();
+    assert_eq!(
+        client.submit(request("broken", "backup.restore", json!({"id":"broken.json"}))),
+        0
+    );
+    assert_eq!(result(&client, "broken")["ok"], false);
+    assert_eq!(client.snapshot()["data"], before["data"]);
+    drop(client);
+    let client = Client::open(dir.options()).unwrap();
+    assert_eq!(client.snapshot()["data"]["profiles"], before["data"]["profiles"]);
+}
+
+#[test]
+fn isolated_commands_forbid_activation_and_global_recovery() {
+    let dir = TestDir::integration();
+    let client = Client::open(dir.integration_options()).unwrap();
+    assert_eq!(client.snapshot()["data"]["capabilities"]["systemProxy"], false);
+    for (i, command) in [
+        "core.update.check",
+        "core.update.stage",
+        "core.update.activate",
+        "core.update.reset",
+        "network.restore",
+        "helper.status",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = format!("forbidden-{i}");
+        assert_eq!(client.submit(request(&id, command, json!({}))), 0);
+        let event = result(&client, &id);
+        assert_eq!(event["ok"], false);
+        assert!(
+            event["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("integrationTest forbids")
+        );
+    }
+}
+
+#[tokio::test]
+async fn core_activation_rolls_back_failed_persistence_and_restores_bundled_baseline() {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TestDir::new();
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let binary = workspace.join(".work/engines/mihomo");
+    assert!(
+        binary.is_file(),
+        "prepare pinned assets with scripts/native-core-assets.sh --offline"
+    );
+    std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let directory = dir.0.join(".work/core-updates/fixture");
+    std::fs::create_dir_all(&directory).unwrap();
+    let candidate = directory.join("mihomo");
+    std::fs::copy(&binary, &candidate).unwrap();
+    let bytes = std::fs::read(&candidate).unwrap();
+    let hash: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+    let report = json!({"latest":{"channel":"stable","version":"v1.19.32","packageUrl":"https://github.com/MetaCubeX/mihomo/releases/download/v1.19.32/mihomo-darwin-arm64-go122-v1.19.32.gz"},"candidatePath":candidate,"binarySha256":hash});
+    std::fs::write(directory.join("candidate.json"), serde_json::to_vec(&report).unwrap()).unwrap();
+    let probe = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = probe.local_addr().unwrap().port();
+    let udp = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
+    let socket = dir.0.join("c.sock");
+    let store = Store::new(port);
+    let state = stopped("fixture", 0, &socket, port);
+    let shared = Arc::new(Shared {
+        snapshot: Mutex::new(store.snapshot(state.clone())),
+        events: Mutex::new(VecDeque::new()),
+        pending: Mutex::new(HashMap::new()),
+        stopping: AtomicBool::new(false),
+        shutdown: Notify::new(),
+    });
+    let mut options = dir.options();
+    options.mihomo_path = Some(binary);
+    options.mixed_port = Some(port);
+    let mut worker = Worker {
+        network: network::NetworkSession::new(&dir.0, ExecutionMode::Interactive).unwrap(),
+        options,
+        store,
+        runtime_state: state,
+        controller: Controller::new(socket.clone(), "fixture-secret".into()).unwrap(),
+        secret: "fixture-secret".into(),
+        shared,
+        scheduler: Scheduler::default(),
+        subscription: None,
+    };
+    drop((probe, udp));
+    worker.start_core("start", &Cancellation::default()).await.unwrap();
+    worker
+        .activate_core(Some(&candidate), "activate", &Cancellation::default())
+        .await
+        .unwrap();
+    assert!(worker.is_running());
+    assert_eq!(worker.store.active_core, Some(candidate.clone()));
+    let revision = worker.store.revision;
+    std::fs::create_dir(dir.0.join("state.pending")).unwrap();
+    assert!(
+        worker
+            .activate_core(None, "reset-fails", &Cancellation::default())
+            .await
+            .is_err()
+    );
+    assert!(worker.is_running());
+    assert_eq!(worker.store.active_core, Some(candidate));
+    assert_eq!(worker.store.revision, revision);
+    std::fs::remove_dir(dir.0.join("state.pending")).unwrap();
+    worker
+        .activate_core(None, "reset", &Cancellation::default())
+        .await
+        .unwrap();
+    assert!(worker.is_running());
+    assert!(worker.store.active_core.is_none());
+    assert_eq!(worker.store.revision, revision + 1);
+    worker.stop_core("stop").await.unwrap();
+    assert!(!socket.exists());
+    assert!(std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).is_ok());
 }

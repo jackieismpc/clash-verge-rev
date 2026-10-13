@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 mod audit;
-mod updates;
+use clash_verge_core_update as updates;
 
 const MAX_ARCHIVE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 128 * 1024 * 1024;

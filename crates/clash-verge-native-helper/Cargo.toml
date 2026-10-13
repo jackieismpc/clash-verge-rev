@@ -1,0 +1,13 @@
+[package]
+name = "clash-verge-native-helper"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "Independently approved native macOS TUN launch daemon"
+
+[[bin]]
+name = "clash-native-helper"
+path = "src/main.rs"
+
+[dependencies]
+clash-verge-native-core = { path = "../clash-verge-native-core" }

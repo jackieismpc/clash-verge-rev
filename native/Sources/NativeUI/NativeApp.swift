@@ -7,6 +7,22 @@ typealias ViewState<Value> = SwiftUI.State<Value>
 @MainActor final class NativeAppDelegate: NSObject, NSApplicationDelegate {
     static var model: AppModel?
     private var terminating = false
+    private var visibilityObservers: [NSObjectProtocol] = []
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        Self.model?.startMonitoring()
+        for name in [NSWindow.didChangeOcclusionStateNotification, NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification, NSWindow.didBecomeKeyNotification, NSWindow.willCloseNotification] {
+            visibilityObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { notification in
+                let closingMain = name == NSWindow.willCloseNotification && (notification.object as? NSWindow)?.title == "Clash Native"
+                MainActor.assumeIsolated {
+                    if closingMain {
+                        Self.model?.setWindowVisibility(false)
+                    } else {
+                        Self.model?.setWindowVisibility(NSApplication.shared.windows.contains { $0.title == "Clash Native" && $0.isVisible && !$0.isMiniaturized && $0.occlusionState.contains(.visible) })
+                    }
+                }
+            })
+        }
+    }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !terminating else { return .terminateLater }
@@ -37,7 +53,7 @@ typealias ViewState<Value> = SwiftUI.State<Value>
         Window("Clash Native", id: "main") {
             RootView(model: model)
                 .frame(minWidth: 980, minHeight: 628)
-                .task { await model.poll() }
+                .onAppear { model.startMonitoring(); model.setWindowVisibility(true) }
         }
         .defaultSize(width: model.isDemo && CommandLine.arguments.contains("--minimum-window") ? 980 : 1280,
                      height: model.isDemo && CommandLine.arguments.contains("--minimum-window") ? 680 : 820)
@@ -140,10 +156,10 @@ struct RootView: View {
                 }
                 ToolbarItemGroup(placement: .primaryAction) {
                     NetworkFeatureControl(title: "系统代理", status: model.snapshot?.networkFeatures.systemProxy ?? .unavailable, demo: model.isDemo) {
-                        Task { await model.command("toggleSystemProxyDemo") }
+                        Task { await model.command(model.isDemo ? "toggleSystemProxyDemo" : "toggleSystemProxy") }
                     }
                     NetworkFeatureControl(title: "TUN", status: model.snapshot?.networkFeatures.tun ?? .unavailable, demo: model.isDemo) {
-                        Task { await model.command("toggleTunDemo") }
+                        Task { await model.command(model.isDemo ? "toggleTunDemo" : "toggleTun") }
                     }
                     Button { Task { await model.refresh() } } label: { Label("刷新", systemImage: "arrow.clockwise") }
                         .help("刷新状态（⌘R）")

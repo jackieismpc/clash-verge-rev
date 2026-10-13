@@ -6,7 +6,16 @@ compile_error!("clash-verge-native-core supports Apple Silicon macOS only");
 pub mod config;
 pub mod controller;
 mod ffi;
+pub mod helper;
 mod isolation;
+mod logs;
+mod migration;
+mod network;
+pub mod platform;
+mod rules;
+mod runtime_helper;
+mod subscriptions;
+mod update;
 mod uri;
 
 use anyhow::{Context, Result, bail};
@@ -27,6 +36,7 @@ use std::{
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use subscriptions::{ScheduleProfile, Scheduler, UpdateTicket};
 use tokio::{
     runtime::Runtime,
     sync::{Notify, mpsc},
@@ -225,6 +235,7 @@ impl Client {
             "runtime.pending",
             "runtime-staged.pending",
             "runtime-rollback.pending",
+            "network-ownership.pending",
         ] {
             match std::fs::remove_file(options.data_dir.join(filename)) {
                 Ok(()) => {}
@@ -255,7 +266,13 @@ impl Client {
             Store::new(options.mixed_port.unwrap_or(17890))
         };
         store.validate()?;
-        let runtime_state = stopped(&owner, 0, &socket, store.settings.mixed_port);
+        let mut runtime_state = stopped(&owner, 0, &socket, store.settings.mixed_port);
+        runtime_state["executionMode"] = if options.execution_mode == ExecutionMode::IntegrationTest {
+            "integrationTest"
+        } else {
+            "interactive"
+        }
+        .into();
         let shared = Arc::new(Shared {
             snapshot: Mutex::new(store.snapshot(runtime_state.clone())),
             events: Mutex::new(VecDeque::new()),
@@ -268,12 +285,15 @@ impl Client {
         let mut controller = Controller::new(socket, secret.clone())?;
         controller.integration_test = options.execution_mode == ExecutionMode::IntegrationTest;
         let mut worker = Worker {
+            network: network::NetworkSession::new(&options.data_dir, options.execution_mode)?,
             options,
             store,
             runtime_state,
             controller,
             secret,
             shared: Arc::clone(&shared),
+            scheduler: Scheduler::default(),
+            subscription: None,
         };
         runtime.spawn(async move {
             worker.serve(receiver).await;
@@ -353,15 +373,127 @@ struct Worker {
     controller: Controller,
     secret: String,
     shared: Arc<Shared>,
+    scheduler: Scheduler,
+    subscription: Option<SubscriptionTask>,
+    network: network::NetworkSession,
+}
+struct SubscriptionTask {
+    ticket: UpdateTicket,
+    cancel: Arc<Cancellation>,
+    task: tokio::task::JoinHandle<Result<(String, Value)>>,
 }
 impl Worker {
+    fn active_binary(&self) -> Result<std::path::PathBuf> {
+        match &self.store.active_core {
+            Some(path) => update::validate_owned_candidate(&self.options.data_dir, path),
+            None => self
+                .options
+                .mihomo_path
+                .clone()
+                .context("mihomoPath is required to start the owned core"),
+        }
+    }
+    async fn activate_core(&mut self, path: Option<&std::path::Path>, id: &str, cancel: &Cancellation) -> Result<()> {
+        if self.runtime_state["helperMode"] == true {
+            bail!("disable TUN before changing the active core");
+        }
+        let path = path
+            .map(|path| update::validate_owned_candidate(&self.options.data_dir, path))
+            .transpose()?;
+        let binary = path
+            .clone()
+            .or_else(|| self.options.mihomo_path.clone())
+            .context("bundled core is unavailable")?;
+        let sign = tokio::process::Command::new("/usr/bin/codesign")
+            .args(["--verify", "--strict"])
+            .arg(&binary)
+            .kill_on_drop(true)
+            .output();
+        let output = cancel
+            .run(async { Ok(tokio::time::timeout(Duration::from_secs(15), sign).await??) })
+            .await?;
+        if !output.status.success() {
+            bail!("core code signature is invalid");
+        }
+        let report = if let Some(path) = &path {
+            let report: Value = serde_json::from_slice(
+                &tokio::fs::read(
+                    path.parent()
+                        .context("missing candidate directory")?
+                        .join("candidate.json"),
+                )
+                .await?,
+            )?;
+            Some(
+                json!({"channel":report["latest"]["channel"],"version":report["latest"]["version"],"candidatePath":path,"activated":true}),
+            )
+        } else {
+            None
+        };
+        let yaml = self
+            .store
+            .owned_runtime_yaml(&self.controller.socket, &self.secret, &self.options)?;
+        let config = self.options.data_dir.join("runtime-staged.yaml");
+        atomic_write(&config, yaml.as_bytes()).await?;
+        cancel
+            .run(Controller::validate(&binary, &config, &self.options.data_dir, false))
+            .await?;
+        cancel.check()?;
+        let prior = self.store.clone();
+        let was_running = self.is_running();
+        let proxy_on = self.network.proxy_on;
+        let dns_servers = self.network.dns_servers.clone();
+        if was_running {
+            self.stop_core(id).await?;
+        }
+        self.store.active_core = path;
+        self.store.core_update = report;
+        let outcome = async {
+            if was_running {
+                self.start_core(id, &Cancellation::default()).await?;
+            }
+            self.commit(self.store.clone(), id, &Cancellation::default()).await
+        }
+        .await;
+        if let Err(error) = outcome {
+            if self.store.revision != prior.revision {
+                self.restore_network_modes(proxy_on, dns_servers)?;
+                return Err(error.context("new core already committed; durability warning"));
+            }
+            let _ = self.stop_core(id).await;
+            self.store = prior;
+            let restart = if was_running {
+                self.start_core(id, &Cancellation::default()).await
+            } else {
+                Ok(())
+            };
+            if restart.is_ok() {
+                self.restore_network_modes(proxy_on, dns_servers)?;
+            }
+            self.publish_state(id);
+            return Err(error.context(format!("core change failed; prior core restore: {restart:?}")));
+        }
+        self.restore_network_modes(proxy_on, dns_servers)?;
+        self.publish_state(id);
+        Ok(())
+    }
+    fn restore_network_modes(&mut self, proxy: bool, dns: Vec<String>) -> Result<()> {
+        if proxy {
+            self.network.set_proxy(true, self.store.settings.mixed_port)?;
+        }
+        if !dns.is_empty() {
+            self.network.set_dns(dns, self.store.settings.mixed_port)?;
+        }
+        Ok(())
+    }
     async fn serve(&mut self, mut receiver: mpsc::Receiver<Queued>) {
+        self.publish_state("");
         let mut health = tokio::time::interval(Duration::from_secs(1));
         loop {
             let queued = tokio::select! { biased;
                 _ = self.shared.shutdown.notified() => break,
                 queued = receiver.recv() => match queued { Some(queued) => queued, None => break },
-                _ = health.tick() => { self.check_core_health().await; continue; },
+                _ = health.tick() => { self.check_core_health().await; self.update_subscriptions().await; continue; },
             };
             let id = queued.request.id.clone();
             if ["proxy.delay", "media.check", "media.checkAll"].contains(&queued.request.command.as_str())
@@ -417,6 +549,11 @@ impl Worker {
             lock(&self.shared.pending).remove(&id);
         }
         receiver.close();
+        self.scheduler.cancel_all();
+        if let Some(subscription) = self.subscription.take() {
+            subscription.cancel.cancel();
+            let _ = subscription.task.await;
+        }
         while let Some(queued) = receiver.recv().await {
             self.shared.publish(
                 &queued.request.id,
@@ -434,10 +571,104 @@ impl Worker {
         self.runtime_state["coreGeneration"].as_u64().unwrap_or(0)
     }
     fn publish_state(&self, id: &str) {
-        self.shared.state(&self.store, &self.runtime_state, id);
+        let mut runtime = self.runtime_state.clone();
+        let mut network = self.network.state();
+        if self.runtime_state["helperMode"] == true {
+            network["tun"] = if self.is_running() { "on" } else { "failed" }.into();
+        }
+        runtime["network"] = network;
+        self.shared.state(&self.store, &runtime, id);
     }
     fn is_running(&self) -> bool {
         self.runtime_state["status"] == "running"
+    }
+
+    fn scheduled_profiles(&self) -> Vec<ScheduleProfile> {
+        self.store
+            .profiles
+            .iter()
+            .filter_map(|profile| {
+                Some(ScheduleProfile {
+                    id: profile.id.clone(),
+                    url: profile.url.clone()?,
+                    updated_at: profile.updated_at,
+                    interval_minutes: profile.update_interval_minutes,
+                })
+            })
+            .collect()
+    }
+    async fn cancel_subscription(&mut self, id: &str) {
+        self.scheduler.cancel(id);
+        if self
+            .subscription
+            .as_ref()
+            .is_some_and(|task| task.ticket.profile.id == id)
+        {
+            let task = self.subscription.take();
+            if let Some(task) = task {
+                task.cancel.cancel();
+                task.task.abort();
+                let _ = task.task.await;
+            }
+        }
+    }
+    async fn update_subscriptions(&mut self) {
+        let profiles = self.scheduled_profiles();
+        if self
+            .subscription
+            .as_ref()
+            .is_some_and(|task| !self.scheduler.is_current(&task.ticket, &profiles))
+            && let Some(task) = self.subscription.take()
+        {
+            task.cancel.cancel();
+            task.task.abort();
+            let _ = task.task.await;
+            self.scheduler.cancel(&task.ticket.profile.id);
+        }
+        if self.subscription.as_ref().is_some_and(|task| task.task.is_finished())
+            && let Some(task) = self.subscription.take()
+        {
+            let result = task
+                .task
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("subscription task interrupted")));
+            if self.scheduler.is_current(&task.ticket, &self.scheduled_profiles()) {
+                let outcome = match result {
+                    Ok((yaml, metadata)) => {
+                        let mut candidate = self.store.clone();
+                        match candidate.profile_mut(&task.ticket.profile.id) {
+                            Ok(profile) => {
+                                profile.yaml = yaml;
+                                profile.updated_at = now();
+                                profile.subscription_info =
+                                    serde_json::from_value(metadata["subscriptionInfo"].clone()).unwrap_or(None);
+                                self.commit(candidate, "subscription:auto", &Cancellation::default())
+                                    .await
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
+                self.scheduler.finish(&task.ticket, now(), outcome.is_ok());
+                if let Err(error) = outcome {
+                    self.shared.publish(
+                        "subscription:auto",
+                        "state",
+                        Err(error.context("automatic subscription update failed; saved profile retained")),
+                    );
+                }
+            }
+        }
+        if self.subscription.is_none()
+            && let Some(ticket) = self.scheduler.claim_due(&self.scheduled_profiles(), now())
+        {
+            let url = ticket.profile.url.clone();
+            let cancel = Arc::new(Cancellation::default());
+            let task_cancel = Arc::clone(&cancel);
+            let task = tokio::spawn(async move { fetch_profile(&url, &task_cancel).await });
+            self.subscription = Some(SubscriptionTask { ticket, cancel, task });
+        }
     }
 
     async fn execute(&mut self, request: &Request, cancel: &Cancellation) -> Result<Value> {
@@ -451,6 +682,7 @@ impl Worker {
                 "helper.",
                 "login.",
                 "autostart.",
+                "network.",
             ]
             .iter()
             .any(|prefix| request.command.starts_with(prefix))
@@ -489,10 +721,7 @@ impl Worker {
                         let profile = json!({"proxies": [proxy], "proxy-groups": [{"name": "Imported", "type": "select", "proxies": [node_name]}], "rules": ["MATCH,Imported"]});
                         (serde_yaml_ng::to_string(&profile)?, json!({}))
                     }
-                    None => {
-                        self.fetch_profile(url.context("yaml or url is required")?, cancel)
-                            .await?
-                    }
+                    None => fetch_profile(url.context("yaml or url is required")?, cancel).await?,
                 };
                 let parsed = parse_profile_yaml(&yaml)?;
                 if url.is_some() && parsed.get("proxies").is_none() && parsed.get("proxy-providers").is_none() {
@@ -525,13 +754,13 @@ impl Worker {
             }
             "profile.update" => {
                 let id = string(args, "id")?;
+                self.cancel_subscription(id).await;
                 let old = self.store.profile(id)?.clone();
                 let (yaml, metadata) = match args.get("yaml").and_then(Value::as_str) {
                     Some(yaml) => (yaml.to_string(), None),
                     None => {
-                        let (yaml, metadata) = self
-                            .fetch_profile(old.url.as_deref().context("local profile needs yaml")?, cancel)
-                            .await?;
+                        let (yaml, metadata) =
+                            fetch_profile(old.url.as_deref().context("local profile needs yaml")?, cancel).await?;
                         (yaml, Some(metadata))
                     }
                 };
@@ -543,7 +772,9 @@ impl Worker {
                 if let Some(metadata) = metadata {
                     profile.subscription_info =
                         serde_json::from_value(metadata["subscriptionInfo"].clone()).unwrap_or(None);
-                    profile.update_interval_minutes = metadata["updateIntervalMinutes"].as_u64();
+                    if profile.update_interval_minutes.is_none() {
+                        profile.update_interval_minutes = metadata["updateIntervalMinutes"].as_u64();
+                    }
                     profile.home = metadata["home"].as_str().map(str::to_string);
                 }
                 self.commit(candidate, &request.id, cancel).await?;
@@ -552,6 +783,9 @@ impl Worker {
             "profile.select" | "profile.delete" | "profile.rename" => {
                 let id = string(args, "id")?;
                 self.store.profile(id)?;
+                if request.command == "profile.delete" {
+                    self.cancel_subscription(id).await;
+                }
                 let mut candidate = self.store.clone();
                 match request.command.as_str() {
                     "profile.select" => candidate.selected_profile_id = Some(id.into()),
@@ -574,6 +808,93 @@ impl Worker {
                 self.commit(candidate, &request.id, cancel).await?;
                 Ok(self.store.snapshot(self.runtime_state.clone()))
             }
+            "subscription.configure" => {
+                let id = string(args, "id")?;
+                let interval = args
+                    .get("intervalMinutes")
+                    .and_then(Value::as_u64)
+                    .context("intervalMinutes must be a nonnegative integer")?;
+                subscriptions::validate_interval(Some(interval))?;
+                self.cancel_subscription(id).await;
+                let mut candidate = self.store.clone();
+                let profile = candidate.profile_mut(id)?;
+                if profile.url.is_none() {
+                    bail!("local profiles have no subscription schedule");
+                }
+                profile.update_interval_minutes = Some(interval);
+                self.commit(candidate, &request.id, cancel).await?;
+                Ok(self.store.snapshot(self.runtime_state.clone()))
+            }
+            "rules.overrides.get" => Ok(serde_json::to_value(&self.store.rule_overrides)?),
+            "rules.overrides.set" => {
+                let mut candidate = self.store.clone();
+                candidate.rule_overrides = serde_json::from_value(args.clone())?;
+                self.commit(candidate, &request.id, cancel).await?;
+                Ok(self.store.snapshot(self.runtime_state.clone()))
+            }
+            "legacy.import" => {
+                let source = std::path::PathBuf::from(string(args, "path")?);
+                let fallback = self.options.data_dir.join("legacy-fallback");
+                use std::os::unix::fs::PermissionsExt;
+                tokio::fs::create_dir_all(&fallback).await?;
+                tokio::fs::set_permissions(&fallback, std::fs::Permissions::from_mode(0o700)).await?;
+                let imported = cancel
+                    .run(async {
+                        tokio::task::spawn_blocking(move || migration::inspect_legacy(&source, &fallback)).await?
+                    })
+                    .await?;
+                let mut candidate = self.store.clone();
+                if imported
+                    .profiles
+                    .iter()
+                    .any(|p| candidate.profiles.iter().any(|existing| existing.id == p.id))
+                {
+                    bail!("legacy profiles already imported; remove duplicates before importing again");
+                }
+                if candidate.selected_profile_id.is_none() {
+                    candidate.selected_profile_id = imported.selected_profile_id.clone();
+                }
+                candidate.profiles.extend(imported.profiles);
+                candidate.migration_warnings = imported.warnings;
+                self.commit(candidate, &request.id, cancel).await?;
+                Ok(self.store.snapshot(self.runtime_state.clone()))
+            }
+            "core.update.check" | "core.update.stage" => {
+                if self.options.execution_mode == ExecutionMode::IntegrationTest {
+                    bail!("integrationTest forbids remote core updates");
+                }
+                let alpha = match args.get("channel").and_then(Value::as_str).unwrap_or("stable") {
+                    "stable" => false,
+                    "alpha" => true,
+                    _ => bail!("unknown core channel"),
+                };
+                let latest = if request.command == "core.update.check" {
+                    let report = cancel.run(update::check_latest(alpha)).await?;
+                    json!({"channel":report.channel,"version":report.version,"candidatePath":null,"activated":false})
+                } else {
+                    let report = cancel.run(update::stage_latest(&self.options.data_dir, alpha)).await?;
+                    json!({"channel":report.latest.channel,"version":report.latest.version,"candidatePath":report.candidate_path,"activated":false})
+                };
+                let mut candidate = self.store.clone();
+                candidate.core_update = Some(latest);
+                self.commit(candidate, &request.id, cancel).await?;
+                Ok(self.store.snapshot(self.runtime_state.clone()))
+            }
+            "core.update.activate" => {
+                if self.options.execution_mode == ExecutionMode::IntegrationTest {
+                    bail!("integrationTest forbids core activation");
+                }
+                let path = std::path::PathBuf::from(string(args, "candidatePath")?);
+                self.activate_core(Some(&path), &request.id, cancel).await?;
+                Ok(self.store.snapshot(self.runtime_state.clone()))
+            }
+            "core.update.reset" => {
+                if self.options.execution_mode == ExecutionMode::IntegrationTest {
+                    bail!("integrationTest forbids core activation");
+                }
+                self.activate_core(None, &request.id, cancel).await?;
+                Ok(self.store.snapshot(self.runtime_state.clone()))
+            }
             "settings.patch" => {
                 let mut candidate = self.store.clone();
                 if let Some(mode) = args.get("mode") {
@@ -583,7 +904,9 @@ impl Worker {
                     candidate.settings.mixed_port =
                         u16::try_from(port.as_u64().context("mixedPort must be an integer")?)?;
                 }
-                if self.is_running() && candidate.settings.mixed_port != self.store.settings.mixed_port {
+                if (self.is_running() || self.controller.child.is_some() || self.runtime_state["helperMode"] == true)
+                    && candidate.settings.mixed_port != self.store.settings.mixed_port
+                {
                     bail!("stop the owned core before changing mixedPort");
                 }
                 self.commit(candidate, &request.id, cancel).await?;
@@ -598,9 +921,13 @@ impl Worker {
                 Ok(self.store.snapshot(self.runtime_state.clone()))
             }
             "runtime.restart" => {
+                let proxy_on = self.network.proxy_on;
+                let dns_servers = self.network.dns_servers.clone();
                 self.stop_core(&request.id).await?;
                 cancel.check()?;
                 self.start_core(&request.id, cancel).await?;
+                self.restore_network_modes(proxy_on, dns_servers)?;
+                self.publish_state(&request.id);
                 Ok(self.store.snapshot(self.runtime_state.clone()))
             }
             "core.request" => self.core_request(args, &request.id, cancel).await,
@@ -646,79 +973,66 @@ impl Worker {
                     bail!("backup exceeds size limit");
                 }
                 let candidate: Store = serde_json::from_slice(&bytes)?;
+                let mut candidate = candidate;
+                candidate.active_core = self.store.active_core.clone();
+                candidate.core_update = self.store.core_update.clone();
+                self.scheduler.cancel_all();
+                if let Some(task) = self.subscription.take() {
+                    task.cancel.cancel();
+                    task.task.abort();
+                    let _ = task.task.await;
+                }
                 self.commit(candidate, &request.id, cancel).await?;
                 Ok(self.store.snapshot(self.runtime_state.clone()))
             }
-            "systemProxy.set" | "tun.set" | "helper.install" | "helper.status" => {
-                bail!("unsupported: native privileged helper and OS restoration adapter are not implemented")
+            "systemProxy.set" => {
+                let enabled = args
+                    .get("enabled")
+                    .and_then(Value::as_bool)
+                    .context("enabled is required")?;
+                if enabled && !self.is_running() {
+                    bail!("start the owned core before enabling system proxy");
+                }
+                let outcome = self.network.set_proxy(enabled, self.store.settings.mixed_port);
+                self.publish_state(&request.id);
+                outcome?;
+                Ok(lock(&self.shared.snapshot).clone())
+            }
+            "systemDns.set" => {
+                let servers: Vec<String> =
+                    serde_json::from_value(args.get("servers").context("servers required")?.clone())?;
+                let outcome = self.network.set_dns(servers, self.store.settings.mixed_port);
+                self.publish_state(&request.id);
+                outcome?;
+                Ok(self.store.snapshot(self.runtime_state.clone()))
+            }
+            "network.restore" => {
+                self.network.authorize_recovery()?;
+                let outcome = self.network.restore();
+                self.publish_state(&request.id);
+                outcome?;
+                Ok(Value::Null)
+            }
+            "helper.status" => {
+                let status = helper::request(
+                    &helper::HelperCommand::Status,
+                    self.options.execution_mode == ExecutionMode::IntegrationTest,
+                )?;
+                Ok(serde_json::to_value(status)?)
+            }
+            "tun.set" => {
+                self.set_tun(
+                    args.get("enabled")
+                        .and_then(Value::as_bool)
+                        .context("enabled required")?,
+                    &request.id,
+                    cancel,
+                )
+                .await?;
+                Ok(self.store.snapshot(self.runtime_state.clone()))
             }
             _ => bail!("unsupported command {}", request.command),
         }
-    }
-
-    async fn fetch_profile(&self, url: &str, cancel: &Cancellation) -> Result<(String, Value)> {
-        let url = reqwest::Url::parse(url)?;
-        if !["https", "http"].contains(&url.scheme()) || !url.username().is_empty() || url.password().is_some() {
-            bail!("subscription URL must be HTTP(S) without embedded credentials");
-        }
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .timeout(Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::limited(5))
-            .user_agent("Clash-Verge-Native/0.1")
-            .build()?;
-        cancel
-            .run(async {
-                let mut response = client.get(url).send().await?.error_for_status()?;
-                let mut metadata = json!({});
-                for (key, value) in response.headers() {
-                    if key
-                        .as_str()
-                        .strip_suffix("subscription-userinfo")
-                        .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with('-'))
-                    {
-                        let mut info = BTreeMap::<String, u64>::new();
-                        for pair in value.to_str()?.split(';') {
-                            if let Some((name, number)) = pair.trim().split_once('=')
-                                && ["upload", "download", "total", "expire"].contains(&name)
-                                && let Ok(number) = number.trim().parse::<u64>()
-                            {
-                                info.insert(name.to_string(), number);
-                            }
-                        }
-                        metadata["subscriptionInfo"] = serde_json::to_value(info)?;
-                    }
-                }
-                if let Some(interval) = response
-                    .headers()
-                    .get("profile-update-interval")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .and_then(|v| v.checked_mul(60))
-                {
-                    metadata["updateIntervalMinutes"] = interval.into();
-                }
-                if let Some(home) = response
-                    .headers()
-                    .get("profile-web-page-url")
-                    .and_then(|v| v.to_str().ok())
-                    && let Ok(url) = reqwest::Url::parse(home)
-                    && ["https", "http"].contains(&url.scheme())
-                {
-                    metadata["home"] = url.as_str().into();
-                }
-                let mut bytes = Vec::new();
-                while let Some(chunk) = response.chunk().await? {
-                    if bytes.len() + chunk.len() > MAX_DOCUMENT_BYTES {
-                        bail!("subscription exceeds 16 MiB limit");
-                    }
-                    bytes.extend_from_slice(&chunk);
-                }
-                let text = String::from_utf8(bytes)?;
-                parse_yaml(&text)?;
-                Ok((text.trim_start_matches('\u{feff}').to_string(), metadata))
-            })
-            .await
     }
 
     async fn commit(&mut self, mut candidate: Store, id: &str, cancel: &Cancellation) -> Result<()> {
@@ -731,10 +1045,11 @@ impl Worker {
         let yaml = candidate.owned_runtime_yaml(&self.controller.socket, &self.secret, &self.options)?;
         let staged = self.options.data_dir.join("runtime-staged.yaml");
         atomic_write(&staged, yaml.as_bytes()).await?;
-        if let Some(binary) = &self.options.mihomo_path {
+        if self.options.mihomo_path.is_some() || self.store.active_core.is_some() {
+            let binary = self.active_binary()?;
             cancel
                 .run(Controller::validate(
-                    binary,
+                    &binary,
                     &staged,
                     &self.options.data_dir,
                     self.controller.integration_test,
@@ -744,12 +1059,19 @@ impl Worker {
         cancel.check()?;
         // Cancellation is deferred after this boundary: runtime reload and durable
         // publication either finish together or restore the previous runtime.
-        if self.is_running()
-            && let Err(error) = self
-                .controller
-                .request("PUT", "/configs?force=true", Some(&json!({"path":staged})))
-                .await
-        {
+        let reload = if self.is_running() {
+            if self.runtime_state["helperMode"] == true {
+                self.reload_helper(&yaml)
+            } else {
+                self.controller
+                    .request("PUT", "/configs?force=true", Some(&json!({"path":staged})))
+                    .await
+                    .map(|_| ())
+            }
+        } else {
+            Ok(())
+        };
+        if let Err(error) = reload {
             self.restore_runtime()
                 .await
                 .context("failed to restore runtime after rejected reload")?;
@@ -796,11 +1118,15 @@ impl Worker {
             .store
             .owned_runtime_yaml(&self.controller.socket, &self.secret, &self.options)?;
         atomic_write(&path, yaml.as_bytes()).await?;
-        if let Err(error) = self
-            .controller
-            .request("PUT", "/configs?force=true", Some(&json!({"path":path})))
-            .await
-        {
+        let restore = if self.runtime_state["helperMode"] == true {
+            self.reload_helper(&yaml)
+        } else {
+            self.controller
+                .request("PUT", "/configs?force=true", Some(&json!({"path":path})))
+                .await
+                .map(|_| ())
+        };
+        if let Err(error) = restore {
             self.runtime_state["status"] = "failed".into();
             self.runtime_state["error"] = format!("configuration rollback failed: {error:#}").into();
             self.publish_state("");
@@ -813,14 +1139,13 @@ impl Worker {
         if self.is_running() {
             return Ok(());
         }
+        if self.runtime_state["helperMode"] == true {
+            self.stop_helper().await?;
+        }
         if self.controller.child.is_some() {
             self.controller.stop().await?;
         }
-        let binary = self
-            .options
-            .mihomo_path
-            .clone()
-            .context("mihomoPath is required to start the owned core")?;
+        let binary = self.active_binary()?;
         let port = self.store.settings.mixed_port;
         let probe = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
             .context("owned mixedPort is already occupied")?;
@@ -867,6 +1192,7 @@ impl Worker {
             }
             Err(error) => {
                 let _ = self.controller.stop().await;
+                let _ = self.network.restore();
                 self.runtime_state["status"] = "failed".into();
                 self.runtime_state["pid"] = Value::Null;
                 self.runtime_state["error"] = format!("{error:#}").into();
@@ -877,15 +1203,37 @@ impl Worker {
     }
 
     async fn stop_core(&mut self, id: &str) -> Result<()> {
+        let network_restore = self.network.restore();
         let outcome = self.controller.stop().await;
+        if outcome.is_ok() {
+            self.stop_helper().await?;
+        }
         self.runtime_state["coreGeneration"] = self.generation().checked_add(1).context("generation exhausted")?.into();
         self.runtime_state["status"] = if outcome.is_ok() { "stopped" } else { "failed" }.into();
+        if let Err(error) = &network_restore {
+            self.runtime_state["error"] = format!("network recovery required: {error:#}").into();
+        }
         self.runtime_state["pid"] = Value::Null;
+        self.runtime_state["socketPath"] = self.controller.socket.to_string_lossy().to_string().into();
         self.publish_state(id);
-        outcome
+        outcome?;
+        network_restore
     }
 
     async fn check_core_health(&mut self) {
+        if self.runtime_state["helperMode"] == true {
+            match helper::request(&helper::HelperCommand::Status, false) {
+                Ok(status) if status.running && status.owner.as_deref() == Some(self.network.owner()) => return,
+                outcome => {
+                    self.runtime_state["status"] = "failed".into();
+                    self.runtime_state["pid"] = Value::Null;
+                    self.runtime_state["error"] = format!("owned TUN session unavailable: {outcome:?}").into();
+                    let _ = self.network.restore();
+                    self.publish_state("");
+                    return;
+                }
+            }
+        }
         let exited = self
             .controller
             .child
@@ -894,10 +1242,12 @@ impl Worker {
             .flatten();
         if let Some(status) = exited {
             let _ = self.controller.stop().await;
+            let recovery = self.network.restore();
             self.runtime_state["coreGeneration"] = self.generation().saturating_add(1).into();
             self.runtime_state["status"] = "failed".into();
             self.runtime_state["pid"] = Value::Null;
-            self.runtime_state["error"] = format!("owned Mihomo exited: {status}").into();
+            self.runtime_state["error"] =
+                format!("owned Mihomo exited: {status}; network recovery: {recovery:?}").into();
             self.publish_state("");
         }
     }
@@ -973,14 +1323,14 @@ impl Worker {
         Ok(result)
     }
 
-    async fn backup_create(&self) -> Result<Value> {
+    async fn backup_create(&mut self) -> Result<Value> {
         let directory = self.options.data_dir.join("backups");
         tokio::fs::create_dir_all(&directory).await?;
         let id = format!("{}.json", unique_id());
         atomic_write(&directory.join(&id), &serde_json::to_vec_pretty(&self.store)?).await?;
         Ok(json!({"id":id,"createdAt":now(),"revision":self.store.revision}))
     }
-    async fn backup_list(&self) -> Result<Value> {
+    async fn backup_list(&mut self) -> Result<Value> {
         let directory = self.options.data_dir.join("backups");
         tokio::fs::create_dir_all(&directory).await?;
         let mut entries = tokio::fs::read_dir(directory).await?;
@@ -995,6 +1345,75 @@ impl Worker {
         backups.sort_by(|a, b| b["createdAt"].as_u64().cmp(&a["createdAt"].as_u64()));
         Ok(json!(backups))
     }
+}
+
+async fn fetch_profile(url: &str, cancel: &Cancellation) -> Result<(String, Value)> {
+    let url = reqwest::Url::parse(url)?;
+    if !["https", "http"].contains(&url.scheme()) || !url.username().is_empty() || url.password().is_some() {
+        bail!("subscription URL must be HTTP(S) without embedded credentials");
+    }
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .user_agent("Clash-Verge-Native/0.1")
+        .build()?;
+    cancel
+        .run(async {
+            let mut response = client.get(url).send().await?.error_for_status()?;
+            let mut metadata = json!({});
+            for (key, value) in response.headers() {
+                if key
+                    .as_str()
+                    .strip_suffix("subscription-userinfo")
+                    .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with('-'))
+                {
+                    let mut info = BTreeMap::<String, u64>::new();
+                    for pair in value.to_str()?.split(';') {
+                        if let Some((name, number)) = pair.trim().split_once('=')
+                            && ["upload", "download", "total", "expire"].contains(&name)
+                            && let Ok(number) = number.trim().parse::<u64>()
+                        {
+                            info.insert(name.to_string(), number);
+                        }
+                    }
+                    metadata["subscriptionInfo"] = serde_json::to_value(info)?;
+                }
+            }
+            if let Some(interval) = response
+                .headers()
+                .get("profile-update-interval")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok())
+                .and_then(|v| v.checked_mul(60))
+                .filter(|v| subscriptions::validate_interval(Some(*v)).is_ok())
+            {
+                metadata["updateIntervalMinutes"] = interval.into();
+            }
+            if let Some(home) = response
+                .headers()
+                .get("profile-web-page-url")
+                .and_then(|v| v.to_str().ok())
+                && let Ok(url) = reqwest::Url::parse(home)
+                && ["https", "http"].contains(&url.scheme())
+            {
+                metadata["home"] = url.as_str().into();
+            }
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await? {
+                if bytes.len() + chunk.len() > MAX_DOCUMENT_BYTES {
+                    bail!("subscription exceeds 16 MiB limit");
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            let text = String::from_utf8(bytes)?;
+            let parsed = parse_profile_yaml(&text)?;
+            if parsed.get("proxies").is_none() && parsed.get("proxy-providers").is_none() {
+                bail!("remote profile must contain proxies or proxy-providers");
+            }
+            Ok((text.trim_start_matches('\u{feff}').to_string(), metadata))
+        })
+        .await
 }
 
 fn string<'a>(args: &'a Value, name: &str) -> Result<&'a str> {

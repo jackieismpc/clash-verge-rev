@@ -98,8 +98,78 @@ struct NetworkFeatureControl: View {
             }
         }
         .foregroundStyle(status == .on ? Color.green : status == .failed ? Color.orange : Color.primary)
-        .disabled(status == .unavailable || status == .applying || !demo)
-        .help(status == .unavailable ? "Mac 权限服务尚未接通" : demo ? "演示状态，不修改系统网络" : status.title)
+        .disabled(status == .unavailable || status == .applying)
+        .help(status == .unavailable ? "隔离测试禁用系统网络操作" : demo ? "演示状态，不修改系统网络" : status.title)
         .accessibilityLabel("\(title)，\(status.title)\(demo ? "，演示模式" : "")")
+    }
+}
+
+
+struct SubscriptionScheduleEditor: View {
+    @Bindable var model: AppModel
+    let profile: ProfileRecord
+    @Environment(\.dismiss) private var dismiss
+    @ViewState private var minutes = "1440"
+    private var valid: Bool { Int(minutes).map { (0...525600).contains($0) } ?? false }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("自动更新 · \(profile.name)").font(.title2)
+            TextField("更新间隔（分钟）", text: $minutes)
+            Text("0 停用自动更新；默认每天更新。失败会有限重试，原有配置继续生效。")
+                .font(.caption).foregroundStyle(.secondary)
+            if let error = model.failure { Text(error.detail).font(.caption).foregroundStyle(.red) }
+            HStack {
+                Spacer()
+                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("保存") {
+                    Task {
+                        await model.command("configureSubscription", payload: ["profileID": profile.id, "intervalMinutes": minutes])
+                        if model.failure == nil { dismiss() }
+                    }
+                }.keyboardShortcut(.defaultAction).disabled(!valid || model.busy || model.isDemo)
+            }
+        }.padding(24).frame(width: 500)
+            .onAppear { minutes = String(profile.updateIntervalMinutes ?? 1440) }
+    }
+}
+
+struct LocalRuleEditor: View {
+    @Bindable var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @ViewState private var prepend = ""
+    @ViewState private var append = ""
+    @ViewState private var delete = ""
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("持久本地规则覆盖").font(.title2)
+            Text("每行一条 mihomo 规则。删除按完整文本匹配源规则；订阅刷新保留这些覆盖。")
+                .font(.caption).foregroundStyle(.secondary)
+            ruleInput("前置规则（优先匹配）", text: $prepend)
+            ruleInput("后置规则", text: $append)
+            ruleInput("从源规则删除", text: $delete)
+            if let error = model.failure { Text(error.detail).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
+            HStack {
+                Spacer()
+                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("保存") {
+                    Task {
+                        await model.command("setRuleOverrides", payload: ["prepend": prepend, "append": append, "delete": delete])
+                        if model.failure == nil { dismiss() }
+                    }
+                }.keyboardShortcut(.defaultAction).disabled(model.busy || model.isDemo)
+            }
+        }.padding(24).frame(width: 700, height: 600)
+            .onAppear {
+                prepend = model.snapshot?.ruleOverrides.prepend.joined(separator: "\n") ?? ""
+                append = model.snapshot?.ruleOverrides.append.joined(separator: "\n") ?? ""
+                delete = model.snapshot?.ruleOverrides.delete.joined(separator: "\n") ?? ""
+            }
+    }
+    private func ruleInput(_ title: String, text: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.caption)
+            TextEditor(text: text).font(.system(size: 12, design: .monospaced))
+                .accessibilityLabel(title)
+        }
     }
 }

@@ -14,3 +14,4 @@ tokio = { workspace = true, features = ["fs", "io-util"] }
 reqwest = { workspace = true }
 sha2 = "0.11"
 flate2 = "1.1.10"
+clash-verge-core-update = { workspace = true }

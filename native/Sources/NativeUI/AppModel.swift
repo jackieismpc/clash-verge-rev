@@ -42,6 +42,8 @@ enum ClientPage: String, CaseIterable, Identifiable {
     var testTotal: Int { testingNames.count }
     @ObservationIgnored private var nodeTestTask: Task<Void, Never>?
     @ObservationIgnored private var refreshing = false
+    @ObservationIgnored private var monitorTask: Task<Void, Never>?
+    private var windowVisible = true
     var busy: Bool { operations > 0 }
     var failure: ClientFailure?
     var showImport = false
@@ -64,9 +66,18 @@ enum ClientPage: String, CaseIterable, Identifiable {
     func poll() async {
         await refresh()
         while !Task.isCancelled {
-            do { try await Task.sleep(for: .seconds(1)) } catch { return }
+            do { try await Task.sleep(for: .seconds(windowVisible ? 1 : 5)) } catch { return }
             await refresh()
         }
+    }
+    func startMonitoring() {
+        guard monitorTask == nil else { return }
+        monitorTask = Task { await poll() }
+    }
+    func setWindowVisibility(_ visible: Bool) {
+        guard windowVisible != visible else { return }
+        windowVisible = visible
+        Task { await transport.setVisibility(visible) }
     }
 
     func refresh() async {
@@ -114,7 +125,11 @@ enum ClientPage: String, CaseIterable, Identifiable {
     }
     func cancelNodeTests() { nodeTestTask?.cancel() }
 
-    func shutdown() async { await transport.shutdown() }
+    func shutdown() async {
+        monitorTask?.cancel(); monitorTask = nil
+        nodeTestTask?.cancel()
+        await transport.shutdown()
+    }
 
     private func accept(_ incoming: CoreSnapshot) {
         guard SnapshotOrdering.accepts(incoming, after: snapshot) else { return }

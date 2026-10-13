@@ -95,16 +95,44 @@ Swift 拥有展示和编辑草稿；业务缺口用能力状态表达，不伪�
 依赖 M2；沿用版本化 C ABI/JSON。Rust 拥有配置事务、队列、取消和
 生命周期，保留 generation/revision 顺序、资源归属及失败恢复。
 
-- [ ] M4.1：订阅调度、节点 URI 导入、provider 操作和持久本地规则覆盖。
-  本轮迁出 13 类节点 URI 与别名解析；provider 更新/本地 YAML 覆盖已接通。
-  自动订阅调度、专用规则覆盖及完整工作流验收仍未完成。
-- [ ] M4.2：旧数据/备份导入、脚本迁移提示、mihomo 更新入口。
-  本轮导入拒绝自定义 JS 并提示迁到 YAML，不执行或改写原文件。
-  官方 stable/alpha 查询和候选暂存迁到 Rust CLI；不替换固定内核。
-  旧数据/ZIP 导入、UI 候选激活及更新回滚仍未实现。
-- [ ] M4.3：Mac 系统代理/DNS/TUN 与权限服务适配器；测试模式禁止 OS 写入。
-  本机只做模拟适配器测试，禁止对日常网络进行真测。
-- [ ] M4.4：流重连、可见性/后台订阅、日志轮转、取消及退出清理。
+- [x] M4.1：订阅调度、节点 URI 导入、provider 操作和持久本地规则覆盖。
+  订阅单项后台更新，默认 1440 分钟；0 禁用，失败最多两次短重试。
+  取消/删除/修改调度后旧任务不能提交，停止时等待所属任务退出。
+  专用 prepend/append/delete 规则独立持久化，订阅刷新不覆盖。
+  验证：loopback 自动更新工作流与规则保留、调度取消/过期票据、原生
+  Swift → Rust → mihomo 规则覆盖/provider 更新/备份恢复工作流通过。
+- [x] M4.2：旧数据/备份导入、脚本迁移提示、mihomo 更新入口。
+  目录/ZIP 先复制私有原件再转换，保留选中配置与节点、旧自动更新禁用
+  设置；拒绝路径逃逸、
+  symlink、重复文件及超限展开。JS 与旧增强 YAML 保留并明确提示。
+  stable/alpha 查询/候选暂存共用 Rust 库；UI 可明确启用私有候选或恢复
+  固定基线。签名/哈希/架构/配置检查失败不切换，提交失败恢复旧内核。
+  验证：旧 ZIP 实际命令导入、重复导入回滚、损坏备份、源文件保持、
+  固定 mihomo 的候选激活/失败回滚/基线恢复/所属进程清理测试通过。
+  本轮未执行官方远端更新，也未改变 Go 内核 v1.19.32。
+- [x] M4.3：正式 Mac 系统代理/DNS/TUN 与独立权限服务适配器；测试模式
+  在任何 OS/IPC 调用前禁止系统操作。SystemConfiguration 显式授权，
+  0600 ownership journal 按字段 CAS 恢复，保留外部修改；关闭 PAC
+  后启用手动代理。授权取消/checkpoint/恢复失败状态准确且可重试。
+  TUN 采用独立 SMAppService root helper，固定 root 所有的签名安装包、
+  peer audit token/code hash/UID 与 owner/generation 校验，私有 controller
+  防火墙禁止任意特权配置路径；使用固定内核，不使用可写候选。
+  验证：mock/纯编码权限、PAC、DNS、CAS、checkpoint、helper 生命周期、
+  目录与协议校验通过；正式 helper 编译、打包及签名验证通过。
+  提供用户执行的安装脚本，工具未安装/注册服务、授权或改变系统网络。
+- [ ] M4.3V：系统代理/DNS/TUN、helper 注册/批准/启停、登录启动的真实
+  macOS 系统验收。2026-10-13 用户确认没有 VM，暂时跳过，由用户后续
+  自行检测。M4.3 勾选只表示实现及确定性验证完成，不表示 OS 真测通过。
+- [x] M4.4：流重连、可见性/后台订阅、日志轮转、取消及退出清理。
+  WebSocket 连接/握手/idle 超时与有限退避重连，重新连通清除流错误；
+  隐藏窗口停止指标/连接订阅与投影刷新，必要日志/后台订阅继续。
+  普通/特权内核日志最多 4 × 2 MiB，I/O 失败仍排空 pipe；取消和退出
+  等待所属任务/进程；TUN 启动任意中途错误尝试清理所属 session，失败
+  保留身份供恢复。成功 reload 清理无引用旧 staging，保留外部目录。
+  验证：Unix WebSocket 断线重连、日志上限、取消/退出、重新启动和
+  Swift 隐藏/显示真实桥接工作流通过。
+  移除无消费者的 Rust staticlib 产物类型，只构建 Swift 使用的 cdylib
+  和 helper/Rust 使用的 rlib；旧静态档及 incremental 缓存仅在项目内清理。
 - [x] M4.5：按本轮新授权直接删除 Tauri、旧业务壳和专属依赖。
   保留已接通的原生功能；其余 M4 项不阻塞退场，明确记录待重做。
   验证：原生业务库独立构建、现有工作流回归、源码和依赖扫描通过。
@@ -131,23 +159,47 @@ Swift 拥有展示和编辑草稿；业务缺口用能力状态表达，不伪�
   symlink、覆写再启用网络、禁止命令、UDP 端口冲突和 0600/0700 权限。
   Swift 真实 mihomo 桥接已使用该模式；机场测试仍未运行。
   提交主题：`feat(test): enforce private native integration runtime policy`。
-- [ ] M5.2：确定性测试覆盖路径/端口、配置回滚、取消/过期结果、快速
-  切换、流断线、备份损坏、退出清理与重新启动。
-- [ ] M5.3：真实测试入口。默认 VLESS/SS/Hysteria2/TUIC 每类最多两节点，
-  最多四任务；全量显式开启。客户端明确指定测试代理，清除代理环境。
-  覆盖单项/批量测速、进度/取消、HTTPS 转发与实际代理链；分别记录
-  延迟、TLS、首包及请求成功，DIRECT/其他节点回退不算通过。
-- [ ] M5.4：前后只读比较日常实例、系统代理/DNS/路由。只清理所属进程
-  和 socket，不按名字杀进程，不恢复不属于测试的全局状态。
-- [ ] M5.5：私有日志、匿名报告、Git 敏感产物检查与真实测试证据。
-  外部不可达和日常 TUN 路径影响独立报告，不冒充产品验收。
+- [x] M5.2：确定性测试覆盖路径/端口、配置回滚、取消/过期结果、快速
+  变更、流断线、备份损坏、退出清理、重新启动与内核切换回滚。
+  验证：`scripts/check-local.sh`（源码 audit、fmt、Clippy、Rust 与 Swift），
+  `NATIVE_BUILD_PROFILE=release scripts/native-ui-test.sh` 验证正式优化桥接。
+  最终完整检查：62 项核心 Rust、3 项真实测试入口、4 项构建工具、
+  4 项共享更新库和 9 项 Swift 测试通过，fmt/Clippy/audit 全通过。
+- [x] M5.3：真实测试入口 `scripts/native-integration.sh --profile /absolute/...`。
+  默认 VLESS/SS/Hysteria2/TUIC 每类最多两个；同时测速最多四个，无人为
+  等待，全量需 `--all-nodes`。显式代理、清除代理环境和 curl 配置发现，
+  正常 TLS，核对目标节点/测试策略组，拒绝 DIRECT/其他节点回退。
+  2026-10-14 实际抽测 8 节点；4/8 HTTPS、TLS 与目标链通过：VLESS 1/2、
+  Hysteria2 1/2、TUIC 2/2；SS 0/2。其余 4 项 curl TLS 建连失败（exit 35），
+  不自动归因于客户端或机场。成功项批测延迟 464–1149 ms，首包
+  161–689 ms；只作本次样本记录，不声称协议/吞吐提升。
+- [x] M5.4：真实测试前后只读比较日常实例、系统代理/DNS/全部路由与
+  默认路由，均一致。只停止所属 PID；退出后 PID/socket 消失，TCP/UDP
+  监听释放，未按名称杀进程或恢复全局设置。原始机场文件字节不变。
+- [x] M5.5：真实报告 `.work/integration/i-ffc146c1/summary.json`；原始
+  事件/curl/网络快照仅私有目录，权限和 Git 忽略检查通过；摘要用匿名
+  节点编号，未提交 YAML/凭据/日志。9 条单项/批测进度完整，取消、旧
+  generation 拦截均通过。整体测试退出 1，明确表示 4 项网络失败。
+- [ ] M5.6：复查失败网络样本，尤其 Shadowsocks 的实际转发证据；本轮
+  完成隔离边界和尝试记录，未将未通过协议记为全量产品验收通过。
 
 同机测试隔离数据/进程/控制权，仍共享主机网络。系统代理/TUN 本轮
 只用模拟适配器验证，不安装或接管日常 helper，不修改 mihomo 内核。
 
-## 最终验收
+## 本轮提交与最终验收
 
-- [ ] SwiftUI 视觉与交互、Swift/Rust 桥接、真实网络结果分别有证据。
+2026-10-14 提交主题：`feat(native): complete real runtime and isolated network validation`。
+实现、使用说明及上述进度进入同一次签名提交。完整检查与正式打包日志
+位于 `.work/m4-check.log`、`.work/m4-release-bridge.log`、
+`.work/m4-product-build.log`；真实测试日志 `.work/m5-airport-run.log`。
+
+- [x] SwiftUI 已有用户视觉验收；真实 Swift/Rust/mihomo 桥接通过，真实
+  网络成功/失败有独立记录，默认应用不使用演示数据。
 - [x] 原生链路仅依赖 Swift、Rust、系统工具和 mihomo；无 Node/Tauri。
-- [ ] 所有生成产物被忽略，配置凭据没有进入 Git，签名验证通过。
-- [ ] 性能优化有可复现测量；不将低延迟等同于高吞吐。
+- [x] 生成产物被忽略，未暂存配置凭据；源码 audit 拒绝私有 JSON/YAML、
+  日志及无后缀 Mach-O/ELF。正式 bundle `codesign --verify --deep --strict`
+  通过，Git 提交使用签名并 `git verify-commit HEAD`。
+- [ ] M4.3V 与 M5.6 的真实系统/失败网络验收完成。用户后续系统检测与
+  外部样本复查仍需进行；模拟适配器不代替这些结论。
+- [ ] 性能优化有整产品 GUI/helper/mihomo 可复现内存/CPU/吞吐测量。
+  本轮只记录节点延迟/TLS/首包与有界缓存行为，不将低延迟等同高吞吐。

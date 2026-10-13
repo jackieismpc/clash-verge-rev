@@ -19,6 +19,18 @@ struct ProfileRecord: Codable, Identifiable, Sendable, Hashable {
     var source: String
     var active: Bool
     var updatedAt: Double?
+    var updateIntervalMinutes: Int? = nil
+}
+struct RuleOverrideRecord: Codable, Sendable {
+    var prepend: [String] = []
+    var append: [String] = []
+    var delete: [String] = []
+}
+struct CoreUpdateRecord: Codable, Sendable {
+    var channel: String
+    var version: String
+    var candidatePath: String?
+    var activated: Bool
 }
 
 struct RuleRecord: Codable, Identifiable, Sendable, Hashable {
@@ -69,6 +81,7 @@ enum NetworkFeatureStatus: String, Codable, Sendable, CaseIterable {
 struct NetworkFeatures: Codable, Sendable {
     var systemProxy: NetworkFeatureStatus = .unavailable
     var tun: NetworkFeatureStatus = .unavailable
+    var dns: NetworkFeatureStatus = .off
 }
 
 enum LogPresentation {
@@ -135,6 +148,9 @@ struct CoreSnapshot: Codable, Sendable {
     var profileDocuments: [String: String] = [:]
     var providers: [ProviderRecord] = []
     var networkFeatures: NetworkFeatures = NetworkFeatures()
+    var ruleOverrides: RuleOverrideRecord = RuleOverrideRecord()
+    var migrationWarnings: [String] = []
+    var coreUpdate: CoreUpdateRecord? = nil
 }
 
 struct CommandEnvelope: Codable, Sendable {
@@ -151,11 +167,13 @@ protocol CoreTransport: Sendable {
     func snapshot() async throws -> CoreSnapshot
     func execute(_ command: CommandEnvelope) async throws -> CoreSnapshot
     func shutdown() async
+    func setVisibility(_ visible: Bool) async
 }
 
 extension CoreTransport {
     var isIntegrationTest: Bool { false }
     func shutdown() async {}
+    func setVisibility(_ visible: Bool) async {}
 }
 
 enum SnapshotOrdering {

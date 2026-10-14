@@ -329,3 +329,53 @@ M7 验证证据（2026-10-14）：
 当前服务尚未安装/批准，代码修复不能代替管理员与系统设置授权；真实
 系统代理/DNS/TUN 仍按 M4.3V 由用户执行验收。本轮没有注册/安装服务或
 修改全局网络，不将权限引导、模拟测试或显式代理测试算作系统代理通过。
+
+## M8：失败诊断与并发刷新稳定性
+
+2026-10-14 继续 M5.6 失败样本复查，保持固定 Go 内核和已有系统真测边界。
+
+- [x] M8.1：匿名报告区分显式代理建连、TLS、HTTP、目标链验证阶段，保留
+  curl 退出码和有效时间；原始错误仅写私有目录，不输出机场地址或凭据。
+  完成标准：失败分类、空/损坏指标、证书失败和目标链拒绝的确定性回归通过。
+- [x] M8.2：节点详情保留测速失败原因；后台刷新遇到配置并发变化时丢弃
+  过期投影，不弹错误、不掩盖真实故障。结果/状态恢复后旧错误不残留。
+  完成标准：节点结果显示与并发刷新/变更回归通过。
+- [x] M8.3：用完全人工构造的 loopback Shadowsocks 2022 服务验证真实
+  Swift/Rust/mihomo 转发及错误密钥拒绝，所有进程/端口/文件只属于测试。
+  完成标准：正确密钥转发到自有目标、错误密钥不抵达、关闭后监听释放。
+  本地成功不能代替机场节点或系统代理/TUN 验收；M5.6 仍按外部结果记录。
+
+M8 验证证据（2026-10-14，基线 `7b6f1c35`）：
+
+- `scripts/check-local.sh`：源码 audit、fmt、Clippy `-D warnings`、90 项
+  Rust（78 核心 + 4 runner + 4 构建工具 + 4 更新库）、18 项 Swift 通过；
+  `.work/m8-check.log`。`NATIVE_BUILD_PROFILE=release scripts/native-ui-test.sh`
+  同样 18 项通过；`.work/m8-release-bridge.log`。夹具启动失败兜底清理
+  补强后再次运行 release 的 SS 专项通过；`.work/m8-release-cleanup.log`。
+- `scripts/native-ui-build.sh`：正式 arm64 包与严格递归签名检查通过；
+  `.work/m8-product-build.log`。没有启动真实 GUI、注册 helper 或修改系统网络。
+- 版本 2 匿名报告只取 curl 数值与固定分类代码，原始 URL/错误不进入
+  摘要。覆盖 TLS 握手/证书拒绝、阶段超时、HTTP 失败、缺少目标链、非法
+  指标和进程中断；已完成的 TLS 验证不会因后续 HTTP 失败变成失败。
+  这些是客户端观察阶段，不把 TLS 握手前断流直接判为证书或协议引擎问题。
+- Swift → Rust → 固定 mihomo → 自有单密钥 SS 2022 loopback 服务 → 自有
+  HTTP 目标：正确密钥转发成功，错误密钥不抵达目标；修改配置后测速成功，
+  错误详情清除，普通刷新保留失败详情。失败后仍允许手动选择；关闭后两个
+  所属 controller socket 消失，监听可重用。所有密钥都是人工样本。
+  夹具使用[官方入站配置](https://wiki.metacubex.one/config/inbound/listeners/ss/)，
+  未涵盖机场多用户服务及外部 HTTPS，也不将本地成功记为 M5.6 通过。
+- 连续八轮真实内核模式修改与投影刷新并发通过。临时移除过期投影处理后
+  同一回归明确抛出 `stale_result`；恢复实现后通过，负向对照日志
+  `.work/m8-refresh-negative-control.log`，修复日志 `.work/m8-ss-fixed.log`。
+  仅后台刷新丢弃正常的过期结果，用户测速及其他真实错误仍返回失败。
+- 第三轮机场隔离复测仍 2/8 HTTPS/TLS/目标链成功：VLESS 1/2、TUIC 1/2、
+  SS 0/2、Hysteria2 0/2，退出 1。六项失败均 curl 35、TLS 未完成；其中
+  一个成功转发节点测速失败，不能把测速结果当作所有网络请求的可用性。
+  所选节点的原始字段与源配置完整一致；此证据不能验证远端认证或线路。
+  报告 `.work/integration/i-185c805d/summary.json`，日志 `.work/m8-airport.log`。
+  取消、进度、过期代次拦截、源文件不变、私有权限和所属 PID/socket/TCP/UDP
+  清理通过；日常进程、系统代理、DNS、全部/默认路由快照均字节一致。
+
+本轮提交主题：`fix(native): retain probe diagnostics and tolerate superseded refresh`。
+M5.6 外部失败样本与 M4.3V 真实系统验收保持未完成；固定 mihomo 未修改，
+不安装/注册服务、不接管或恢复日常 Clash Verge 的网络配置。

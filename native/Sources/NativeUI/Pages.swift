@@ -53,7 +53,7 @@ struct NodesView: View {
                         Text(node.latencyMS.map { "\($0) ms" } ?? "—")
                             .monospacedDigit().foregroundStyle(node.available ? Color.primary : Color.secondary)
                     }.width(80)
-                    TableColumn("状态") { node in Text(node.available ? (node.latencyMS == nil ? "未检测" : "可用") : "不可用") }.width(70)
+                    TableColumn("状态") { node in Text(node.statusTitle) }.width(70)
                 }
                 .contextMenu(forSelectionType: String.self) { ids in
                     Button("使用节点") { use(ids) }.disabled(ids.count != 1 || model.busy)
@@ -69,16 +69,22 @@ struct NodesView: View {
                     HStack(alignment: .top, spacing: 20) {
                         VStack(alignment: .leading, spacing: 8) {
                             Text(node.name).font(.system(size: 14, weight: .semibold)).textSelection(.enabled)
-                            Text("\(node.kind) · \(node.group) · \(node.available ? "可用" : "不可用")")
+                            Text("\(node.kind) · \(node.group) · \(node.statusTitle)")
                                 .font(.system(size: 12)).foregroundStyle(.secondary)
                             if let date = node.testedAt {
                                 Text("\(node.testURL ?? "") · \(Date(timeIntervalSince1970: date).formatted(date: .omitted, time: .standard))")
                                     .font(.system(size: 12)).foregroundStyle(.secondary).textSelection(.enabled)
                             }
+                            if let error = node.testError {
+                                Label("测速失败", systemImage: "exclamationmark.triangle")
+                                    .font(.system(size: 12)).foregroundStyle(.orange)
+                                Text(error).font(.system(size: 12)).foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                            }
                         }
                         Spacer()
                         Button(model.snapshot?.selectedNodeID == node.id ? "正在使用" : "使用节点") { use([node.id]) }
-                            .disabled(!node.available || model.busy || model.snapshot?.selectedNodeID == node.id)
+                            .disabled(model.busy || model.snapshot?.selectedNodeID == node.id)
                     }
                 }
             }

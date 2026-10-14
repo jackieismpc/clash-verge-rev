@@ -198,7 +198,13 @@ actor NativeCoreTransport: CoreTransport {
                 subscribedGeneration = generation
             }
             if visible && pending.isEmpty && (projectionGeneration != generation || projectionRevision != revision || Date().timeIntervalSince(lastProjection) >= 5) {
-                try await reloadProjection()
+                do { try await reloadProjection() }
+                catch let error as ClientFailure where error.isSupersededRead {
+                    projectionRevision = nil
+                    if let authoritative = try loaded.read(loaded.snapshot(loaded.handle)), let data = authoritative.data {
+                        acceptState(authoritative, data: data)
+                    }
+                }
             }
         }
         return projectedSnapshot()
@@ -433,6 +439,7 @@ actor NativeCoreTransport: CoreTransport {
                 next[index].testedAt = prior.testedAt
                 next[index].testURL = prior.testURL
                 next[index].testRequestID = prior.testRequestID
+                next[index].testError = prior.testError
             }
         }
         let mode = state["settings"]["mode"].text ?? "rule"
@@ -468,6 +475,7 @@ actor NativeCoreTransport: CoreTransport {
             nodes[index].testedAt = value["testedAt"].number
             nodes[index].testURL = value["url"].text
             nodes[index].testRequestID = value["requestId"].text
+            nodes[index].testError = value["error"].text
         }
     }
     private func applyUnlock(_ value: WireValue) {

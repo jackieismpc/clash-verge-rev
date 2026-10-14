@@ -237,6 +237,51 @@ fn chain_matches(connection: &Value, target: &str, nodes: &[Node]) -> bool {
         })
 }
 
+fn milliseconds(timings: &Value, key: &str) -> Option<f64> {
+    timings[key]
+        .as_f64()
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| value * 1000.0)
+}
+
+fn probe_report(node: &Node, timings: &Value, exit_code: Option<i32>, chain_seen: bool) -> Value {
+    let tls_ms = milliseconds(timings, "time_appconnect");
+    let connect_ms = milliseconds(timings, "time_connect");
+    let status_code = timings["http_code"]
+        .as_u64()
+        .or_else(|| timings["response_code"].as_u64())
+        .unwrap_or(0);
+    let tunnel_status = timings["http_connect"].as_u64().unwrap_or(0);
+    let tls_verified = timings["ssl_verify_result"].as_u64() == Some(0) && tls_ms.is_some_and(|value| value > 0.0);
+    // Classification uses numeric client facts only; raw errors can contain credentials or endpoints.
+    let failure = match exit_code {
+        None => Some(("client", "processInterrupted")),
+        Some(5 | 6) => Some(("client", "nameResolutionFailed")),
+        Some(7) => Some(("proxyConnection", "proxyConnectionFailed")),
+        Some(60 | 51 | 83 | 90 | 91) => Some(("tls", "tlsCertificateRejected")),
+        Some(58 | 77) => Some(("tls", "tlsTrustSetupFailed")),
+        Some(35 | 53 | 59 | 64 | 66 | 80) => Some(("tls", "tlsHandshakeFailed")),
+        Some(28) if tls_verified => Some(("http", "responseTimeout")),
+        Some(28) if tunnel_status == 200 => Some(("tls", "tlsTimeout")),
+        Some(28) if connect_ms.is_some_and(|value| value > 0.0) => Some(("proxyTunnel", "proxyTunnelTimeout")),
+        Some(28) => Some(("proxyConnection", "proxyConnectionTimeout")),
+        Some(code) if code != 0 && tunnel_status >= 400 => Some(("proxyTunnel", "proxyTunnelRejected")),
+        Some(code) if code != 0 => Some((if tls_verified { "http" } else { "client" }, "curlFailed")),
+        Some(0) if !timings.is_object() || tls_ms.is_none() => Some(("client", "invalidMetrics")),
+        Some(0) if !tls_verified => Some(("tls", "missingTLSVerification")),
+        Some(0) if !(200..400).contains(&status_code) => Some(("http", "httpStatusRejected")),
+        Some(0) if !chain_seen => Some(("targetChain", "targetChainUnverified")),
+        _ => None,
+    };
+    json!({"node":node.id,"protocol":node.protocol,"tlsVerified":tls_verified,
+        "tlsMilliseconds":tls_ms,"proxyConnectMilliseconds":connect_ms,
+        "firstByteMilliseconds":milliseconds(timings,"time_starttransfer"),
+        "totalMilliseconds":milliseconds(timings,"time_total"),"httpStatus":status_code,
+        "proxyTunnelStatus":tunnel_status,"curlExitCode":exit_code,
+        "failureStage":failure.map(|v|v.0),"failureReason":failure.map(|v|v.1),
+        "actualTargetChain":chain_seen,"httpsSuccess":failure.is_none()})
+}
+
 async fn https_probe(bridge: &mut Bridge<'_>, node: &Node, nodes: &[Node], port: u16, url: &str) -> Result<Value> {
     bridge
         .call(
@@ -303,22 +348,12 @@ async fn https_probe(bridge: &mut Bridge<'_>, node: &Node, nodes: &[Node], port:
         &bridge.directory.join(format!("{}.curl.private.stderr", node.id)),
         &errors,
     )?;
-    let timings: Value = serde_json::from_slice(&output).unwrap_or(json!({}));
+    let timings: Value = serde_json::from_slice(&output).unwrap_or(Value::Null);
     private_write(
         &bridge.directory.join(format!("{}.curl.private.json", node.id)),
         &output,
     )?;
-    let tls_seconds = timings["time_appconnect"].as_f64().unwrap_or(0.0);
-    let status_code = timings["http_code"]
-        .as_u64()
-        .or_else(|| timings["response_code"].as_u64())
-        .unwrap_or(0);
-    let tls_verified = status.success() && timings["ssl_verify_result"].as_u64() == Some(0) && tls_seconds > 0.0;
-    let success = status.success() && (200..400).contains(&status_code) && tls_verified && chain_seen;
-    Ok(
-        json!({"node":node.id,"protocol":node.protocol,"tlsVerified":tls_verified,"tlsMilliseconds":tls_seconds*1000.0,
-        "firstByteMilliseconds":timings["time_starttransfer"].as_f64().map(|v|v*1000.0),"httpStatus":status_code,"actualTargetChain":chain_seen,"httpsSuccess":success}),
-    )
+    Ok(probe_report(node, &timings, status.code(), chain_seen))
 }
 
 async fn snapshot_network(directory: &Path, label: &str) -> Result<BTreeMap<String, Vec<u8>>> {
@@ -399,13 +434,14 @@ async fn workflow(bridge: &mut Bridge<'_>, nodes: &[Node], port: u16, url: &str)
         result["delayMilliseconds"] = delays.get(&node.id).cloned().unwrap_or(Value::Null);
         results.push(result);
         println!(
-            "{} {}: delay={} ms TLS={} chain={} HTTPS={}",
+            "{} {}: delay={} ms TLS={} chain={} HTTPS={} failure={}",
             node.id,
             node.protocol,
             delays.get(&node.id).unwrap_or(&Value::Null),
             results.last().unwrap()["tlsVerified"],
             results.last().unwrap()["actualTargetChain"],
-            results.last().unwrap()["httpsSuccess"]
+            results.last().unwrap()["httpsSuccess"],
+            results.last().unwrap()["failureReason"]
         );
     }
     let generation = bridge.client.snapshot()["data"]["runtime"]["coreGeneration"]
@@ -502,6 +538,7 @@ fn execute(args: Arguments) -> Result<bool> {
         .map(|(key, value)| (key.clone(), json!({"unchanged":after.get(key)==Some(value)})))
         .collect::<serde_json::Map<_, _>>();
     report["networkSnapshots"] = changes.into();
+    report["reportVersion"] = 2.into();
     report["sourceUnchanged"] = fs::read_to_string(&args.profile)
         .is_ok_and(|current| current == document)
         .into();
@@ -595,5 +632,66 @@ mod tests {
             &nodes
         ));
         assert!(!chain_matches(&json!({"chains":["node-001"]}), "node-001", &nodes));
+    }
+
+    #[test]
+    fn anonymous_probe_distinguishes_tls_http_and_chain_failures() {
+        let node = Node {
+            id: "node-001".into(),
+            protocol: "ss".into(),
+            value: json!({}),
+        };
+        let mut timings = json!({"time_connect":0.001,"time_appconnect":0.1,"time_starttransfer":0.2,"time_total":0.3,
+            "http_connect":200,"http_code":204,"ssl_verify_result":0,"url_effective":"https://private.example/secret","errormsg":"private endpoint"});
+        let passed = probe_report(&node, &timings, Some(0), true);
+        assert_eq!(passed["httpsSuccess"], true);
+        assert_eq!(passed["tlsMilliseconds"], 100.0);
+        assert!(!passed.to_string().contains("private"));
+        assert_eq!(
+            probe_report(&node, &timings, Some(0), false)["failureReason"],
+            "targetChainUnverified"
+        );
+        let timeout = probe_report(&node, &timings, Some(28), true);
+        assert_eq!(timeout["tlsVerified"], true);
+        assert_eq!(timeout["failureStage"], "http");
+        timings["http_code"] = 503.into();
+        assert_eq!(
+            probe_report(&node, &timings, Some(0), true)["failureReason"],
+            "httpStatusRejected"
+        );
+        timings["time_appconnect"] = 0.into();
+        timings["ssl_verify_result"] = 1.into();
+        assert_eq!(
+            probe_report(&node, &timings, Some(35), true)["failureReason"],
+            "tlsHandshakeFailed"
+        );
+        assert_eq!(
+            probe_report(&node, &timings, Some(60), true)["failureReason"],
+            "tlsCertificateRejected"
+        );
+        assert_eq!(
+            probe_report(&node, &timings, Some(28), false)["failureReason"],
+            "tlsTimeout"
+        );
+        timings["http_connect"] = 0.into();
+        assert_eq!(
+            probe_report(&node, &timings, Some(28), false)["failureReason"],
+            "proxyTunnelTimeout"
+        );
+        timings["time_connect"] = 0.into();
+        assert_eq!(
+            probe_report(&node, &timings, Some(28), false)["failureReason"],
+            "proxyConnectionTimeout"
+        );
+        assert_eq!(
+            probe_report(&node, &Value::Null, Some(0), true)["failureReason"],
+            "invalidMetrics"
+        );
+        assert_eq!(
+            probe_report(&node, &Value::Null, None, false)["failureReason"],
+            "processInterrupted"
+        );
+        timings["time_appconnect"] = (-1).into();
+        assert!(probe_report(&node, &timings, Some(0), true)["tlsMilliseconds"].is_null());
     }
 }

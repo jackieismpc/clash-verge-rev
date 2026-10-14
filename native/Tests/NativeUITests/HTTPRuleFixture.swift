@@ -7,17 +7,19 @@ final class HTTPRuleFixture: @unchecked Sendable {
     private let lock = NSLock()
     private var ready = false
     private var requests = 0
+    private let responseDelay: TimeInterval
     var requestCount: Int { lock.withLock { requests } }
     var url: String { "http://127.0.0.1:\(listener.port!.rawValue)/rules.yaml" }
 
-    private init() throws {
+    private init(responseDelay: TimeInterval) throws {
+        self.responseDelay = responseDelay
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
         listener = try NWListener(using: parameters)
     }
 
-    static func start() async throws -> HTTPRuleFixture {
-        let fixture = try HTTPRuleFixture()
+    static func start(responseDelay: TimeInterval = 0) async throws -> HTTPRuleFixture {
+        let fixture = try HTTPRuleFixture(responseDelay: responseDelay)
         try await fixture.startListening()
         return fixture
     }
@@ -26,12 +28,15 @@ final class HTTPRuleFixture: @unchecked Sendable {
         listener.newConnectionHandler = { [weak self] connection in
             guard let self else { connection.cancel(); return }
             connection.start(queue: self.queue)
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] _, _, _, error in
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] request, _, _, error in
                 guard error == nil, let self else { connection.cancel(); return }
                 self.lock.withLock { self.requests += 1 }
                 let body = "payload:\n  - DOMAIN-SUFFIX,example.net\n  - DOMAIN-SUFFIX,example.org\n"
-                let response = "HTTP/1.1 200 OK\r\nContent-Type: application/yaml\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
-                connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in connection.cancel() })
+                let head = request.map { String(decoding: $0, as: UTF8.self).hasPrefix("HEAD ") } ?? false
+                let response = "HTTP/1.1 200 OK\r\nContent-Type: application/yaml\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(head ? "" : body)"
+                self.queue.asyncAfter(deadline: .now() + self.responseDelay) {
+                    connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in connection.cancel() })
+                }
             }
         }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in

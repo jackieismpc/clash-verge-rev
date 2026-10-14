@@ -10,7 +10,9 @@ struct NodeRecord: Codable, Identifiable, Sendable, Hashable {
     var testedAt: Double? = nil
     var testURL: String? = nil
     var testRequestID: String? = nil
+    var testError: String? = nil
     var latencySort: Int { latencyMS ?? Int.max }
+    var statusTitle: String { testError != nil || !available ? "测速失败" : latencyMS == nil ? "未检测" : "可用" }
 }
 
 struct ProfileRecord: Codable, Identifiable, Sendable, Hashable {
@@ -114,6 +116,7 @@ struct ClientFailure: Codable, Identifiable, Sendable, Hashable, Error {
     var retryable: Bool
     var id: String { code + message }
     var needsNetworkSetup: Bool { code == "helperUnavailable" || code == "helperNotSubmitted" }
+    var isSupersededRead: Bool { ["stale_result", "stale_generation", "staleGeneration", "staleRevision"].contains(code) }
     static func operation(code: String, detail: String) -> Self {
         let message = code == "helperUnavailable" ? "请先准备系统网络权限" : code == "helperNotSubmitted" ? "权限服务请求未提交" : "操作失败"
         return Self(code: code, message: message, detail: detail, retryable: code != "helperUnavailable" && code != "helperNotSubmitted")

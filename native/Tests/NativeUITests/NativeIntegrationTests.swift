@@ -3,7 +3,7 @@ import Testing
 import Darwin
 @testable import NativeUI
 
-private func unusedPort() throws -> UInt16 {
+func unusedPort() throws -> UInt16 {
     let descriptor = socket(AF_INET, SOCK_STREAM, 0)
     guard descriptor >= 0 else { throw POSIXError(.EIO) }
     defer { close(descriptor) }
@@ -153,7 +153,7 @@ private func unusedPort() throws -> UInt16 {
     }
 }
 
-private func forwardThroughOwnedProxy(_ port: UInt16, _ target: String) throws -> Int32 {
+func forwardThroughOwnedProxy(_ port: UInt16, _ target: String) throws -> Int32 {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
     process.arguments = ["-q", "--proxy", "http://127.0.0.1:\(port)", "--noproxy", "", "--max-time", "5", "--silent", "--fail", "--output", "/dev/null", target]

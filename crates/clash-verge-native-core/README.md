@@ -105,3 +105,10 @@ reconnection, rule retention, automatic updates, legacy ZIP, corrupt backup, moc
 network ownership, private paths/ports and C allocation/shutdown. The explicit
 integration binary separately tests real private nodes and records anonymous
 summaries; raw credentials and logs never enter Git. See root README for invocation.
+Report version 2 separates observed client/proxy/TLS/HTTP/chain failure stages,
+uses fixed reason codes instead of raw errors, and includes the actual curl exit
+code. Timing fields are cumulative from request start, not independent phase
+durations. Completed TLS verification is retained when a later HTTP request fails.
+The default native checks also forward through an owned loopback Shadowsocks 2022
+server, reject a synthetic wrong key, recover after config correction, and exercise
+concurrent projection refresh. These checks do not validate any external airport.

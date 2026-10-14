@@ -111,6 +111,9 @@ struct RootView: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorSchemeContrast) private var contrast
 
+    private func permissionTitle(_ status: NetworkFeatureStatus?) -> String? {
+        !model.isDemo && !model.isIntegrationTest && !model.networkPermission.canEnable && status != .on && status != .failed ? model.networkPermission.actionTitle : nil
+    }
     var body: some View {
         NavigationSplitView {
             List(selection: $model.page) {
@@ -140,7 +143,8 @@ struct RootView: View {
                         Label(failure.message, systemImage: "exclamationmark.triangle")
                         Spacer()
                         Button("查看详情") { model.showFailure = true }
-                        if failure.retryable { Button("重试") { Task { await model.refresh() } } }
+                        if failure.needsNetworkSetup { Button("设置权限服务") { model.presentNetworkSetup() } }
+                        else if failure.retryable { Button("重新检查") { Task { await model.refresh() } } }
                     }
                     .font(.system(size: 12))
                     .padding(.horizontal, 24).padding(.vertical, 10)
@@ -167,10 +171,10 @@ struct RootView: View {
                     StatusPill(demo: model.isDemo, status: model.snapshot?.coreStatus ?? "stopped", reduceTransparency: reduceTransparency)
                 }
                 ToolbarItemGroup(placement: .primaryAction) {
-                    NetworkFeatureControl(title: "系统代理", status: model.snapshot?.networkFeatures.systemProxy ?? .unavailable, demo: model.isDemo) {
+                    NetworkFeatureControl(title: "系统代理", status: model.snapshot?.networkFeatures.systemProxy ?? .unavailable, demo: model.isDemo, setupTitle: permissionTitle(model.snapshot?.networkFeatures.systemProxy), disabled: model.busy) {
                         Task { await model.command(model.isDemo ? "toggleSystemProxyDemo" : "toggleSystemProxy") }
                     }
-                    NetworkFeatureControl(title: "TUN", status: model.snapshot?.networkFeatures.tun ?? .unavailable, demo: model.isDemo) {
+                    NetworkFeatureControl(title: "TUN", status: model.snapshot?.networkFeatures.tun ?? .unavailable, demo: model.isDemo, setupTitle: permissionTitle(model.snapshot?.networkFeatures.tun), disabled: model.busy) {
                         Task { await model.command(model.isDemo ? "toggleTunDemo" : "toggleTun") }
                     }
                     Button { Task { await model.refresh() } } label: { Label("刷新", systemImage: "arrow.clockwise") }
@@ -184,6 +188,7 @@ struct RootView: View {
         }
         .preferredColorScheme(preferredScheme)
         .sheet(isPresented: $model.showImport) { ImportSheet(model: model) }
+        .sheet(isPresented: $model.showNetworkSetup) { NetworkSetupSheet(model: model) }
         .sheet(isPresented: $model.showFailure) { FailureSheet(failure: model.failure) }
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: model.page)
         .onChange(of: model.page) { _, _ in model.query = "" }

@@ -17,7 +17,7 @@ native_uninstall_transaction() {
   "$remove"
 }
 native_refuse_live_application() {
-  if /bin/ps -axo comm= | /usr/bin/awk '$0 ~ /\/ClashNative$/ {found=1} END {exit !found}'; then
+  if /bin/ps -ww -axo comm= | /usr/bin/awk '$0 ~ /(^|\/)ClashNative$/ {found=1} END {exit !found}'; then
     print -u2 'Quit all Clash Native instances before changing the installation.'
     return 1
   fi

@@ -32,12 +32,16 @@ private func unusedPort() throws -> UInt16 {
     defer { try? FileManager.default.removeItem(at: directory) }
     let transport = NativeCoreTransport(options: NativeCoreOptions(libraryPath: library, dataDirectory: directory.path, mihomoPath: mihomo, hostPath: environment["CVN_HOST_PATH"], mixedPort: try unusedPort(), executionMode: .integrationTest, integrationRoot: root))
     do {
-        let imported = try await transport.execute(CommandEnvelope(command: "importProfile", payload: ["name": "链接样本", "uri": "ss://YWVzLTEyOC1nY206ZXhhbXBsZQ@example.invalid:443#Sample"]))
+        let imported = try await transport.execute(CommandEnvelope(command: "importProfile", payload: ["name": "链接样本", "source": "  ss://YWVzLTEyOC1nY206ZXhhbXBsZQ@example.invalid:443#Sample  "]))
         #expect(imported.profiles.count == 1)
         let started = try await transport.execute(CommandEnvelope(command: "startCore"))
         #expect(started.coreStatus == "running")
         #expect(started.nodes.contains { $0.group == "Imported" && $0.name == "Sample" })
         #expect(started.rules.contains { $0.target == "Imported" })
+        let profile = try #require(started.profiles.first)
+        await #expect(throws: ClientFailure.self) { try await transport.execute(CommandEnvelope(command: "deleteProfile", payload: ["profileID": profile.id])) }
+        #expect(try await transport.snapshot().coreStatus == "running")
+        #expect(try await transport.snapshot().profiles.count == 1)
         _ = try await transport.execute(CommandEnvelope(command: "stopCore"))
         await #expect(throws: ClientFailure.self) {
             try await transport.execute(CommandEnvelope(command: "importProfile", payload: ["filename": "legacy.js", "yaml": "function main(config) { return config; }"]))
@@ -117,7 +121,9 @@ private func unusedPort() throws -> UInt16 {
         let refreshed = try await transport.execute(CommandEnvelope(command: "updateProvider", payload: ["providerID": remote.id]))
         #expect(refreshed.providers.first { $0.id == remote.id }?.count == 2)
         #expect(providerServer.requestCount > priorRequests)
-        _ = try await transport.execute(CommandEnvelope(command: "selectNode", payload: ["nodeID": direct.id]))
+        let selected = try await transport.execute(CommandEnvelope(command: "selectNode", payload: ["nodeID": direct.id]))
+        #expect(selected.selectedNodeID == direct.id)
+        #expect(try await transport.execute(CommandEnvelope(command: "refresh")).selectedNodeID == direct.id)
         let covered = try await transport.execute(CommandEnvelope(command: "setRuleOverrides", payload: ["prepend": "DOMAIN,local.example,REJECT", "append": "", "delete": ""]))
         #expect(covered.ruleOverrides.prepend == ["DOMAIN,local.example,REJECT"])
         #expect(covered.rules.contains { $0.target == "REJECT" })
@@ -212,4 +218,24 @@ private func forwardThroughOwnedProxy(_ port: UInt16, _ target: String) throws -
     } catch let failure as ClientFailure { #expect(failure.code == "abi_mismatch") }
     #expect(!FileManager.default.fileExists(atPath: directory.path))
     await transport.shutdown()
+}
+
+@Test func authoritativeSnapshotTracksChangesWhenAllStateEventsAreDropped() async throws {
+    let env = ProcessInfo.processInfo.environment
+    let root = try #require(env["CVN_TEST_ROOT"])
+    let directory = URL(fileURLWithPath: root).appendingPathComponent("s-" + UUID().uuidString.prefix(8))
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let fixture = try #require(env["CVN_NO_STATE_LIBRARY_PATH"])
+    let transport = NativeCoreTransport(options: NativeCoreOptions(libraryPath: fixture, dataDirectory: directory.path, mihomoPath: env["CVN_MIHOMO_PATH"], hostPath: env["CVN_HOST_PATH"], mixedPort: try unusedPort(), executionMode: .integrationTest, integrationRoot: root))
+    do {
+        #expect(try await transport.snapshot().profiles.isEmpty)
+        let imported = try await transport.execute(CommandEnvelope(command: "importProfile", payload: ["source": "proxies: []\nrules: ['MATCH,DIRECT']\n"]))
+        #expect(imported.profiles.count == 1)
+        let started = try await transport.execute(CommandEnvelope(command: "startCore"))
+        #expect(started.coreStatus == "running")
+        let changed = try await transport.execute(CommandEnvelope(command: "setMode", payload: ["mode": "direct"]))
+        #expect(changed.mode == "direct")
+        #expect(try await transport.execute(CommandEnvelope(command: "stopCore")).coreStatus == "stopped")
+        await transport.shutdown()
+    } catch { await transport.shutdown(); throw error }
 }

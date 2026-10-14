@@ -4,7 +4,8 @@ project_root="${0:A:h:h}"
 source "$project_root/scripts/installation-common.sh"
 mkdir -p "$project_root/.work/installation-tests"
 fixture=$(/usr/bin/mktemp -d "$project_root/.work/installation-tests/run.XXXXXXXX")
-trap '/bin/rm -rf -- "$fixture"' EXIT
+fixture_pid=''
+trap 'if [[ -n "$fixture_pid" ]]; then kill -TERM "$fixture_pid" 2>/dev/null || true; wait "$fixture_pid" 2>/dev/null || true; fi; /bin/rm -rf -- "$fixture"' EXIT
 mkdir "$fixture/app" "$fixture/data" "$fixture/outside"
 print retained > "$fixture/data/journal"
 print preserved > "$fixture/outside/sentinel"
@@ -25,4 +26,16 @@ if native_uninstall_transaction fixture_unregister fixture_failed_recovery fixtu
 trace=()
 native_uninstall_transaction fixture_unregister fixture_recover fixture_remove
 [[ "${(j:,:)trace}" == unregister,recover,remove && ! -e "$fixture/app" && ! -e "$fixture/data" && -f "$fixture/outside/sentinel" ]]
-print 'Installation fixtures passed: redirected paths rejected, failed unregister/recovery preserved files, successful recovery preceded scoped deletion.'
+/bin/cp /bin/sleep "$fixture/ClashNative"
+"$fixture/ClashNative" 30 &
+fixture_pid=$!
+refused=false
+for attempt in {1..20}; do
+  if ! native_refuse_live_application 2>/dev/null; then refused=true; break; fi
+  /bin/sleep 0.05
+done
+[[ "$refused" == true ]]
+kill -TERM "$fixture_pid"
+wait "$fixture_pid" 2>/dev/null || true
+fixture_pid=''
+print 'Installation fixtures passed: live instance and redirected paths rejected, failed unregister/recovery preserved files, successful recovery preceded scoped deletion.'

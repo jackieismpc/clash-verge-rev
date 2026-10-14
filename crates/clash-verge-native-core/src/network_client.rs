@@ -1,5 +1,5 @@
 use crate::{config::ExecutionMode, helper, platform::validate_dns_servers};
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -35,7 +35,27 @@ impl NetworkClient {
         json!({"systemProxy":if self.mode==ExecutionMode::IntegrationTest {"unavailable"} else if self.recovery {"failed"} else if self.proxy_on {"on"} else {"off"},"dns":if self.recovery {"failed"} else if self.dns_servers.is_empty(){"off"}else{"on"},"tun":"off","recoveryRequired":self.recovery})
     }
     fn accept(&mut self, status: helper::HelperStatus) -> Result<()> {
-        let network = status.network.context("helper omitted network state")?;
+        let Some(network) = status.network else {
+            self.recovery = true;
+            bail!("helper omitted authoritative network state");
+        };
+        let proxy = network["systemProxy"].as_str();
+        let recovery = network["recoveryRequired"].as_bool();
+        let servers = serde_json::from_value::<Vec<String>>(network["dnsServers"].clone());
+        if !matches!(proxy, Some("on" | "off" | "failed")) || recovery.is_none() || servers.is_err() {
+            self.recovery = true;
+            bail!("helper returned malformed network state");
+        }
+        let servers = servers?;
+        if let Err(error) = validate_dns_servers(&servers) {
+            self.recovery = true;
+            return Err(error);
+        }
+        if (proxy == Some("on") || !servers.is_empty() || recovery == Some(true)) && network["owner"].as_str().is_none()
+        {
+            self.recovery = true;
+            bail!("helper omitted active network owner");
+        }
         if let Some(owner) = network["owner"].as_str()
             && (owner != self.owner || network["guiPid"].as_u64() != Some(std::process::id() as u64))
         {
@@ -45,7 +65,7 @@ impl NetworkClient {
             bail!("system network is owned by another native instance");
         }
         self.proxy_on = network["systemProxy"] == "on";
-        self.dns_servers = serde_json::from_value(network["dnsServers"].clone()).unwrap_or_default();
+        self.dns_servers = servers;
         self.recovery = network["recoveryRequired"] == true;
         Ok(())
     }
@@ -67,10 +87,14 @@ impl NetworkClient {
             },
             false,
         );
+        self.apply_reply(outcome)
+    }
+    fn apply_reply(&mut self, outcome: Result<helper::HelperStatus>) -> Result<()> {
         match outcome {
             Ok(status) => self.accept(status),
             Err(error) => {
-                self.recovery = true;
+                self.recovery =
+                    self.recovery || self.proxy_on || !self.dns_servers.is_empty() || helper::may_have_applied(&error);
                 Err(error)
             }
         }
@@ -85,11 +109,11 @@ impl NetworkClient {
         if !self.proxy_on && self.dns_servers.is_empty() && !self.recovery {
             return Ok(());
         }
-        let status = helper::request(
+        let outcome = helper::request(
             &helper::HelperCommand::Status,
             self.mode == ExecutionMode::IntegrationTest,
-        )?;
-        self.accept(status)
+        );
+        self.apply_reply(outcome)
     }
     pub fn restore(&mut self) -> Result<()> {
         if !self.proxy_on && self.dns_servers.is_empty() && !self.recovery {
@@ -142,6 +166,32 @@ fn legacy_recovery_required(directory: &Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn missing_helper_before_submission_does_not_invent_network_ownership() {
+        let directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.work/helper-failures")
+            .join(crate::unique_id());
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut client = NetworkClient::new(&directory, ExecutionMode::Interactive).unwrap();
+        let missing = || helper::before(std::io::Error::from_raw_os_error(libc::ENOENT).into(), true);
+        assert!(client.apply_reply(Err(missing())).is_err());
+        assert_eq!(client.state()["systemProxy"], "off");
+        assert_eq!(client.state()["recoveryRequired"], false);
+        // An untouched client can stop without trying to contact a missing daemon.
+        client.restore().unwrap();
+        client.proxy_on = true;
+        assert!(client.apply_reply(Err(missing())).is_err());
+        assert_eq!(client.state()["recoveryRequired"], true);
+        client.proxy_on = false;
+        client.recovery = false;
+        assert!(
+            client
+                .apply_reply(Err(anyhow::anyhow!("reply lost after submission")))
+                .is_err()
+        );
+        assert_eq!(client.state()["recoveryRequired"], true);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
     #[test]
     fn legacy_ownership_requires_recovery_without_writing_os_or_losing_record() {
         let directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

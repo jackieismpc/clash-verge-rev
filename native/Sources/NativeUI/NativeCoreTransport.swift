@@ -186,8 +186,11 @@ actor NativeCoreTransport: CoreTransport {
     }
 
     func snapshot() async throws -> CoreSnapshot {
-        _ = try open()
+        let loaded = try open()
         try drain()
+        if let authoritative = try loaded.read(loaded.snapshot(loaded.handle)), let data = authoritative.data {
+            acceptState(authoritative, data: data)
+        }
         if unlock.isEmpty { unlock = try await request("media.list").items.compactMap(unlockRecord) }
         if state["runtime"]["status"].text == "running" {
             if subscribedGeneration != generation {
@@ -217,9 +220,7 @@ actor NativeCoreTransport: CoreTransport {
             else if let yaml = payload["yaml"] { args["yaml"] = .string(yaml) }
             else if let uri = payload["uri"] { args["uri"] = .string(uri) }
             else {
-                let source = payload["source"] ?? ""
-                let kind = source.hasPrefix("https://") || source.hasPrefix("http://") ? "url" : "yaml"
-                args[kind] = .string(source)
+                args["source"] = .string(payload["source"] ?? "")
             }
             _ = try await request("profile.import", args: args, id: command.requestID)
         case "selectProfile", "deleteProfile", "updateProfile", "renameProfile":
@@ -234,6 +235,7 @@ actor NativeCoreTransport: CoreTransport {
         case "selectNode":
             guard let node = nodes.first(where: { $0.id == payload["nodeID"] }) else { throw invalid("节点已不存在") }
             _ = try await coreRequest("PUT", "/proxies/\(escaped(node.group))", body: .object(["name": .string(node.name)]), id: command.requestID)
+            selectedNodeID = node.id
             projectionRevision = nil
         case "testNode", "testAllNodes":
             let names: [String]
@@ -272,7 +274,7 @@ actor NativeCoreTransport: CoreTransport {
             _ = try await request("core.update.activate", args: ["candidatePath": .string(payload["candidatePath"] ?? "")], id: command.requestID)
         case "resetCoreUpdate": _ = try await request("core.update.reset", id: command.requestID)
         case "toggleSystemProxy", "setSystemProxy":
-            let enabled = command.command == "setSystemProxy" ? payload["enabled"] == "true" : state["runtime"]["network"]["systemProxy"].text != "on"
+            let enabled = command.command == "setSystemProxy" ? payload["enabled"] == "true" : !["on", "failed"].contains(state["runtime"]["network"]["systemProxy"].text ?? "off")
             _ = try await request("systemProxy.set", args: ["enabled": .bool(enabled)], id: command.requestID)
         case "toggleTun", "setTun":
             let enabled = command.command == "setTun" ? payload["enabled"] == "true" : !state["runtime"]["helperMode"].flag
@@ -281,6 +283,7 @@ actor NativeCoreTransport: CoreTransport {
             let values = (payload["servers"] ?? "").split(whereSeparator: { $0 == "," || $0.isWhitespace }).map { WireValue.string(String($0)) }
             _ = try await request("systemDns.set", args: ["servers": .array(values)], id: command.requestID)
         case "restoreNetwork": _ = try await request("network.restore", id: command.requestID)
+        case "checkHelperStatus": _ = try await request("helper.status", id: command.requestID)
         case "updateProvider":
             guard let provider = providers.first(where: { $0.id == payload["providerID"] }), provider.vehicle.lowercased() != "file" else {
                 throw invalid("该规则源或节点源无法远程更新")
@@ -339,7 +342,7 @@ actor NativeCoreTransport: CoreTransport {
                     }
                     if !result.ok {
                         let error = result.error
-                        throw ClientFailure(code: error?.code ?? "operation_failed", message: "操作失败", detail: error?.message ?? command, retryable: true)
+                        throw ClientFailure.operation(code: error?.code ?? "operation_failed", detail: error?.message ?? command)
                     }
                     return result.data ?? .null
                 }
@@ -372,6 +375,7 @@ actor NativeCoreTransport: CoreTransport {
 
     private func acceptState(_ event: NativeEnvelope, data: WireValue) {
         guard event.coreGeneration > generation || (event.coreGeneration == generation && event.revision >= revision) else { return }
+        if data["selectedProfileId"] != state["selectedProfileId"] { selectedNodeID = nil }
         if generation != event.coreGeneration {
             nodes.removeAll(); rules.removeAll(); providers.removeAll(); connections.removeAll(); traffic.removeAll()
             selectedNodeID = nil; subscribedGeneration = nil; projectionGeneration = nil
@@ -381,6 +385,7 @@ actor NativeCoreTransport: CoreTransport {
             connections.removeAll(); subscribedGeneration = nil; projectionGeneration = nil
         }
         if let error = data["runtime"]["error"].text { failure = ClientFailure(code: "core_failed", message: "内核需要修复", detail: error, retryable: true) }
+        else if failure?.code == "core_failed" { failure = nil }
     }
 
     private func acceptStream(_ data: WireValue, timestamp: Double) {
@@ -410,7 +415,7 @@ actor NativeCoreTransport: CoreTransport {
         let proxyProviders = try await coreRequest("GET", "/providers/proxies")
         guard generation == expectedGeneration, revision == expectedRevision else { return }
         var next: [NodeRecord] = []
-        var chosen: String?
+        var current: [(id: String, group: String)] = []
         let records = proxies["proxies"].fields
         for (group, record) in records.sorted(by: { $0.key < $1.key }) where record["type"].text == "Selector" {
             for entry in record["all"].items {
@@ -420,7 +425,7 @@ actor NativeCoreTransport: CoreTransport {
                 let last = value["history"].items.last?["delay"].number
                 let delay = last.flatMap { $0 > 0 ? Int($0) : nil }
                 next.append(NodeRecord(id: id, name: name, kind: value["type"].text ?? "Unknown", group: group, latencyMS: delay, available: value["alive"] == .bool(false) ? false : true))
-                if record["now"].text == name && (chosen == nil || group == "GLOBAL") { chosen = id }
+                if record["now"].text == name { current.append((id, group)) }
             }
         }
         for index in next.indices {
@@ -430,7 +435,16 @@ actor NativeCoreTransport: CoreTransport {
                 next[index].testRequestID = prior.testRequestID
             }
         }
-        nodes = next; selectedNodeID = chosen
+        let mode = state["settings"]["mode"].text ?? "rule"
+        let fallback = ruleData["rules"].items.last?["proxy"].text
+        let selected: (id: String, group: String)? = mode == "direct"
+            ? next.first { $0.group == "GLOBAL" && $0.name == "DIRECT" }.map { ($0.id, $0.group) }
+            : mode == "global" ? current.first { $0.group == "GLOBAL" }
+            : current.first { $0.id == selectedNodeID && $0.group != "GLOBAL" }
+                ?? current.first { $0.group == fallback }
+                ?? current.first { $0.group != "GLOBAL" }
+                ?? current.first
+        nodes = next; selectedNodeID = selected?.id
         rules = ruleData["rules"].items.enumerated().map { index, value in
             RuleRecord(id: String(index), kind: value["type"].text ?? "", value: value["payload"].text ?? "", target: value["proxy"].text ?? "")
         }

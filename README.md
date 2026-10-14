@@ -19,6 +19,8 @@ Git 历史、来源说明和 GPL-3.0 许可证。Swift 负责界面，Rust 负�
 scripts/native-core-assets.sh
 scripts/native-ui-build.sh
 open '.work/native-ui/Clash Native.app'
+# 后续开发一条命令构建 debug 包并打开（先退出旧原生实例）：
+scripts/native-ui-run.sh
 scripts/check-local.sh
 ```
 
@@ -28,9 +30,16 @@ scripts/check-local.sh
 执行 `scripts/native-core-build.sh build`，缓存仍在 `.work/cargo`；后续离线构建。
 不提供分发签名或公证。详细界面与桥接说明见 [native/README.md](native/README.md)。
 
+构建脚本拒绝覆盖正在运行的原生应用，需用 ⌘Q 退出后重新构建；不会停止
+日常 Clash Verge。开发启动只打开界面，不自动接管系统网络。
+
 默认是真实模式；`--demo` 仅供明确标记的视觉样本。先在「订阅」导入
 YAML、节点链接或订阅地址，选择配置，启动内核并选择节点。可显式使用
 `127.0.0.1:17890`，点击系统代理或 TUN 开关才会改变系统网络。
+
+导入框支持直接粘贴单条节点链接、订阅 URL 或 YAML，分类和解析由 Rust
+完成。无启用配置时启动入口先提示导入；运行期间删除最后一个配置被拒绝，
+请先停止内核，避免无意退回 DIRECT。
 
 本地追加规则插入最终 MATCH 前；显式追加 MATCH 可替换原 fallback。非法规则
 不替换当前配置，覆盖会保留到订阅更新、重启和备份恢复后。
@@ -54,7 +63,9 @@ open '/Applications/Clash Native.app'
 
 在设置 → 网络注册权限服务，并到系统的登录项与扩展批准。安装本身只复制
 签名应用，不接管网络。权限服务未批准时，仍可使用独立 loopback 显式代理，
-系统代理/DNS/TUN 开关会报告权限失败，不绕过监护机制。
+主窗口会显示「需安装/注册服务」或「等待批准」，点击进入权限准备页，
+可复制安装命令；系统设置批准后状态自动刷新。权限未准备好时不提交网络
+接管命令，普通内核仍可独立停止/重启。
 
 网络接管前，helper 持久保存原始值和进程身份。正常退出先恢复仍属本应用
 的代理/DNS，再等待所属核心退出。GUI 崩溃或被强制结束时，独立 helper

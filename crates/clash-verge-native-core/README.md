@@ -57,8 +57,8 @@ A controller selection already applied stays authoritative if saving fails.
 
 Existing commands cover profile import/update/select/delete/rename, YAML overrides,
 settings, owned lifecycle, whitelisted controller requests, WebSocket subscriptions,
-media checks and native JSON backups. `profile.import` accepts exactly one of YAML,
-URL or URI. HTTP(S) subscriptions use normal TLS, bounded redirects and a 16 MiB
+media checks and native JSON backups. `profile.import` accepts exactly one of `yaml`, `url`, `uri` or `source`.
+The generic `source` input is classified by Rust, including pasted share links. HTTP(S) subscriptions use normal TLS, bounded redirects and a 16 MiB
 limit. Scheduling preserves local rules and cancels stale tickets. Legacy imports
 copy bounded original directory/ZIP bytes before conversion, reject traversal and
 symlinks, preserve selections and never execute custom JS.
@@ -78,6 +78,8 @@ controller firewall instead of arbitrary privileged config paths. Its engine is
 fixed inside the signed installed bundle. Proxy/DNS leases monitor both the GUI audit
 token and the owned core's PID/UID/start time. Restore compares only owned fields,
 retains partial ApplyChanges failures for retry and never recreates deleted services.
+Unavailable helper connections before submission cannot create phantom recovery
+state; a lost reply after submission or an existing lease keeps recovery required.
 Service restart recovers journals and exact orphaned engine identities first. Legacy
 GUI journals from the signed bundle's default data directory migrate to root storage
 before restoration; unfinished legacy recovery is surfaced by the GUI. Ordinary

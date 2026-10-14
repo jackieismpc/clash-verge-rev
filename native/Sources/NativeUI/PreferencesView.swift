@@ -53,8 +53,8 @@ private struct GeneralPreferences: View {
 private struct NetworkPreferences: View {
     @Bindable var model: AppModel
     @ViewState private var showOverrides = false
+    @ViewState private var showNetworkSetup = false
     @ViewState private var dns = ""
-    @ViewState private var helperStatus = SMAppService.daemon(plistName: "io.github.jackieismpc.clash-native.helper.plist").status
     private var service: SMAppService { SMAppService.daemon(plistName: "io.github.jackieismpc.clash-native.helper.plist") }
     var body: some View {
         Form {
@@ -69,19 +69,27 @@ private struct NetworkPreferences: View {
                     Button("启动内核") { Task { await model.command("startCore") } }
                         .disabled(model.busy || model.snapshot?.coreStatus == "running")
                     Button("停止内核") { Task { await model.command("stopCore") } }
-                        .disabled(model.snapshot?.coreStatus != "running")
+                        .disabled(!["running", "failed"].contains(model.snapshot?.coreStatus ?? "stopped"))
                 }.disabled(model.isDemo)
             }
             Section("系统网络") {
-                Toggle("系统代理", isOn: Binding(get: { model.snapshot?.networkFeatures.systemProxy == .on }, set: { enabled in
-                    Task { await model.command("setSystemProxy", payload: ["enabled": String(enabled)]) }
+                Toggle("系统代理", isOn: Binding(get: { model.snapshot?.networkFeatures.systemProxy == .on || model.snapshot?.networkFeatures.systemProxy == .failed }, set: { enabled in
+                    if enabled && !model.networkPermission.canEnable { showNetworkSetup = true }
+                    else { Task { await model.command("setSystemProxy", payload: ["enabled": String(enabled)]) } }
                 }))
                 Toggle("TUN 增强模式", isOn: Binding(get: { model.snapshot?.networkFeatures.tun == .on || model.snapshot?.networkFeatures.tun == .failed }, set: { enabled in
-                    Task { await model.command("setTun", payload: ["enabled": String(enabled)]) }
+                    if enabled && !model.networkPermission.canEnable { showNetworkSetup = true }
+                    else { Task { await model.command("setTun", payload: ["enabled": String(enabled)]) } }
                 }))
+                if !model.networkPermission.canEnable {
+                    Button(model.networkPermission.actionTitle + "…") { showNetworkSetup = true }
+                }
                 TextField("系统 DNS（公共或 LAN 地址，用逗号分隔）", text: $dns)
                 HStack {
-                    Button("应用 DNS") { Task { await model.command("setSystemDNS", payload: ["servers": dns]) } }.disabled(dns.isEmpty)
+                    Button("应用 DNS") {
+                        if !model.networkPermission.canEnable { showNetworkSetup = true }
+                        else { Task { await model.command("setSystemDNS", payload: ["servers": dns]) } }
+                    }.disabled(dns.isEmpty)
                     Button("恢复所属系统代理与 DNS") { Task { await model.command("restoreNetwork") } }
                 }
                 Text("系统代理、DNS 与 TUN 由独立权限服务监护；应用消失时恢复所属设置，保留其他应用后续修改。")
@@ -90,22 +98,31 @@ private struct NetworkPreferences: View {
             Section("网络权限服务") {
                 Text("TUN 使用真实 IP 的 DNS 模式，避免关闭后系统缓存保留本应用的 Fake IP。关闭代理模式或退出会恢复所属系统 DNS。")
                     .font(.caption).foregroundStyle(.secondary)
-                Text(helperStatus == .enabled ? "独立服务已获授权" : helperStatus == .requiresApproval ? "等待系统设置中的管理员批准" : "尚未注册独立服务")
+                Text(model.networkPermission.actionTitle)
                 Text("接管系统网络需要将应用安装到 /Applications/Clash Native.app，并授予独立服务权限。不会使用现有 Clash Verge 的服务。")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
-                    Button("注册权限服务") {
-                        do { try service.register(); helperStatus = service.status } catch { model.report(error) }
-                    }.disabled(Bundle.main.bundleURL.path != "/Applications/Clash Native.app" || helperStatus == .enabled)
-                    Button("打开系统授权设置") { SMAppService.openSystemSettingsLoginItems() }
-                    Button("注销服务") { Task { do { await model.command("setTun", payload: ["enabled": "false"]); if model.failure == nil { await model.command("restoreNetwork"); if model.failure != nil { return }; try await service.unregister(); helperStatus = service.status } } catch { model.report(error) } } }
-                        .disabled(helperStatus == .notRegistered)
+                    Button("准备权限服务…") { showNetworkSetup = true }
+                    Button("重新检查") { model.refreshNetworkPermission() }
+                    Button("注销服务") {
+                        Task {
+                            do {
+                                await model.command("setTun", payload: ["enabled": "false"])
+                                guard model.failure == nil else { return }
+                                await model.command("restoreNetwork")
+                                guard model.failure == nil else { return }
+                                try await service.unregister()
+                                model.refreshNetworkPermission()
+                            } catch { model.report(error) }
+                        }
+                    }.disabled(model.networkPermission.stage == .development || model.networkPermission.stage == .unregistered)
                 }
             }.disabled(model.isDemo || model.isIntegrationTest || model.busy)
             Section("配置") {
                 Button("高级 YAML 覆写…") { showOverrides = true }.disabled(model.isDemo)
             }
         }.formStyle(.grouped)
+            .sheet(isPresented: $showNetworkSetup) { NetworkSetupSheet(model: model) }
             .sheet(isPresented: $showOverrides) { OverridesEditor(model: model) }
     }
 }

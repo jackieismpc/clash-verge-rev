@@ -14,6 +14,9 @@ rust_profile=()
 NATIVE_RUST_PACKAGE=clash-verge-native-helper "$project_root/scripts/native-core-build.sh" build --offline "${rust_profile[@]}"
 "$project_root/scripts/native-core-assets.sh" --offline
 /usr/bin/clang -dynamiclib -arch arm64 -mmacosx-version-min=26.0 -I "$project_root/crates/clash-verge-native-core/include" "$project_root/crates/clash-verge-native-core/tests/fixtures/abi1.c" -o "$task_work/abi1-fixture.dylib"
+/usr/bin/clang -dynamiclib -arch arm64 -mmacosx-version-min=26.0 -I "$project_root/crates/clash-verge-native-core/include" "$project_root/crates/clash-verge-native-core/tests/fixtures/no_state_events.c" -o "$task_work/no-state-fixture.dylib"
+export CVN_NO_STATE_LIBRARY_PATH="$task_work/no-state-fixture.dylib"
+export CVN_REAL_LIBRARY_PATH="$project_root/.work/target/aarch64-apple-darwin/$build_profile/libclash_verge_native_core.dylib"
 export CVN_ABI1_LIBRARY_PATH="$task_work/abi1-fixture.dylib"
 export CVN_LIBRARY_PATH="$project_root/.work/target/aarch64-apple-darwin/$build_profile/libclash_verge_native_core.dylib"
 export CVN_HOST_PATH="$project_root/.work/target/aarch64-apple-darwin/$build_profile/clash-native-helper"

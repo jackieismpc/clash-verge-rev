@@ -48,6 +48,10 @@ enum ClientPage: String, CaseIterable, Identifiable {
     var failure: ClientFailure?
     var showImport = false
     var showFailure = false
+    var showNetworkSetup = false
+    @ObservationIgnored private var networkSetupCount = 0
+    var networkPermission: NetworkPermission
+    @ObservationIgnored private let permissionProbe: () -> NetworkPermission
     var query = ""
     var inspectedNodeID: String?
     private let transport: any CoreTransport
@@ -56,8 +60,11 @@ enum ClientPage: String, CaseIterable, Identifiable {
     var selectedNode: NodeRecord? { snapshot?.nodes.first { $0.id == snapshot?.selectedNodeID } }
     var inspectedNode: NodeRecord? { snapshot?.nodes.first { $0.id == inspectedNodeID } }
 
-    init(transport: any CoreTransport) {
+    init(transport: any CoreTransport, permissionProbe: (() -> NetworkPermission)? = nil) {
         self.transport = transport
+        let probe = permissionProbe ?? { transport.isIntegrationTest ? NetworkPermission(stage: .isolated) : transport.isDemo ? NetworkPermission(stage: .demo) : NetworkPermission.current() }
+        self.permissionProbe = probe
+        self.networkPermission = probe()
         if transport.isDemo, let value = CommandLine.arguments.first(where: { $0.hasPrefix("--page=") }) {
             page = ClientPage(rawValue: String(value.dropFirst("--page=".count))) ?? .overview
         }
@@ -80,7 +87,12 @@ enum ClientPage: String, CaseIterable, Identifiable {
         Task { await transport.setVisibility(visible) }
     }
 
+    func networkSetupOpened() { networkSetupCount += 1 }
+    func networkSetupClosed() { networkSetupCount = max(0, networkSetupCount - 1) }
+    func presentNetworkSetup() { if networkSetupCount == 0 { showNetworkSetup = true } }
+    func refreshNetworkPermission() { networkPermission = permissionProbe() }
     func refresh() async {
+        refreshNetworkPermission()
         guard !refreshing else { return }
         refreshing = true
         defer { refreshing = false }
@@ -93,6 +105,20 @@ enum ClientPage: String, CaseIterable, Identifiable {
     }
 
     func command(_ name: String, payload: [String: String] = [:], requestID: String = UUID().uuidString) async {
+        if !isDemo && !isIntegrationTest {
+            let enablingNetwork = (name == "toggleSystemProxy" && snapshot?.networkFeatures.systemProxy != .on && snapshot?.networkFeatures.systemProxy != .failed)
+                || (name == "toggleTun" && snapshot?.networkFeatures.tun != .on && snapshot?.networkFeatures.tun != .failed)
+                || (["setSystemProxy", "setTun"].contains(name) && payload["enabled"] == "true")
+                || (name == "setSystemDNS" && !(payload["servers"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            if enablingNetwork {
+                refreshNetworkPermission()
+                if !networkPermission.canEnable { presentNetworkSetup(); return }
+            }
+            if (name == "startCore" || enablingNetwork) && snapshot?.profiles.contains(where: { $0.active }) != true {
+                showImport = true
+                return
+            }
+        }
         operations += 1
         let testing = name == "testAllNodes" || name == "testNode"
         if testing { testingNodes = true }
@@ -103,7 +129,11 @@ enum ClientPage: String, CaseIterable, Identifiable {
             accept(result)
         } catch {
             await refresh()
-            if !(error is CancellationError) { record(error); showFailure = !showImport }
+            if !(error is CancellationError) {
+                record(error)
+                if failure?.needsNetworkSetup == true { presentNetworkSetup(); showFailure = false }
+                else { showFailure = !showImport }
+            }
         }
     }
 
@@ -135,9 +165,13 @@ enum ClientPage: String, CaseIterable, Identifiable {
         guard SnapshotOrdering.accepts(incoming, after: snapshot) else { return }
         snapshot = incoming
         if let error = incoming.error { failure = error }
+        else if failure?.code == "core_failed" || failure?.code == "streamFailed" || failure?.code == "stream_failed" { failure = nil }
     }
 
-    func report(_ error: Error) { record(error); showFailure = true }
+    func report(_ error: Error) {
+        failure = (error as? ClientFailure) ?? ClientFailure(code: "native_operation", message: "操作未完成", detail: error.localizedDescription, retryable: true)
+        showFailure = true
+    }
 
     private func record(_ error: Error) {
         failure = (error as? ClientFailure) ?? ClientFailure(code: "transport_error", message: "无法读取内核状态", detail: error.localizedDescription, retryable: true)

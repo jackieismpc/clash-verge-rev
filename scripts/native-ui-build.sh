@@ -2,6 +2,8 @@
 set -euo pipefail
 project_root="${0:A:h:h}"
 task_work="$project_root/.work/native-ui"
+source "$project_root/scripts/installation-common.sh"
+native_refuse_live_application
 mkdir -p "$task_work/tmp" "$task_work/cache" "$task_work/config" "$task_work/security"
 export TMPDIR="$task_work/tmp"
 export CLANG_MODULE_CACHE_PATH="$task_work/cache/clang"
@@ -21,6 +23,7 @@ binary_dir="$(/usr/bin/swift build --package-path "$project_root/native" \
   --configuration "$build_profile" --build-system native --scratch-path "$task_work/build-native" --cache-path "$task_work/cache" \
   --config-path "$task_work/config" --security-path "$task_work/security" \
   --show-bin-path "$@")"
+native_refuse_live_application
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Frameworks" "$bundle/Contents/Resources" "$bundle/Contents/Helpers" "$bundle/Contents/Library/LaunchDaemons"
 cp "$project_root/.work/target/aarch64-apple-darwin/$build_profile/libclash_verge_native_core.dylib" "$bundle/Contents/Frameworks/"
 cp "$project_root/.work/engines/mihomo" "$bundle/Contents/Resources/"

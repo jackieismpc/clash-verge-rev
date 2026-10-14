@@ -87,6 +87,8 @@ struct NetworkFeatureControl: View {
     var title: String
     var status: NetworkFeatureStatus
     var demo: Bool
+    var setupTitle: String? = nil
+    var disabled = false
     var action: () -> Void
     var body: some View {
         Button(action: action) {
@@ -94,13 +96,13 @@ struct NetworkFeatureControl: View {
                 if status == .applying { ProgressView().controlSize(.mini) }
                 else { Image(systemName: status == .on ? "checkmark.circle.fill" : status == .failed ? "exclamationmark.circle" : "circle") }
                 Text(title)
-                Text(status.title).foregroundStyle(.secondary)
+                Text(setupTitle ?? status.title).foregroundStyle(.secondary)
             }
         }
         .foregroundStyle(status == .on ? Color.green : status == .failed ? Color.orange : Color.primary)
-        .disabled(status == .unavailable || status == .applying)
-        .help(status == .unavailable ? "隔离测试禁用系统网络操作" : demo ? "演示状态，不修改系统网络" : status.title)
-        .accessibilityLabel("\(title)，\(status.title)\(demo ? "，演示模式" : "")")
+        .disabled(disabled || (status == .unavailable && setupTitle == nil) || status == .applying)
+        .help(setupTitle ?? (status == .unavailable ? "隔离测试禁用系统网络操作" : demo ? "演示状态，不修改系统网络" : status.title))
+        .accessibilityLabel("\(title)，\(setupTitle ?? status.title)\(demo ? "，演示模式" : "")")
     }
 }
 

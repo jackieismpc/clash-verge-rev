@@ -178,7 +178,14 @@ impl Shared {
             }
             Err(error) => {
                 let message = format!("{error:#}").chars().take(8192).collect::<String>();
-                let code = if message.starts_with("request cancelled") {
+                let code = if error
+                    .downcast_ref::<helper::BeforeSubmission>()
+                    .is_some_and(|error| error.unavailable)
+                {
+                    "helperUnavailable"
+                } else if error.is::<helper::BeforeSubmission>() {
+                    "helperNotSubmitted"
+                } else if message.starts_with("request cancelled") {
                     "cancelled"
                 } else if message.starts_with("stale core generation") {
                     "staleGeneration"
@@ -862,24 +869,17 @@ impl Worker {
             "snapshot" => Ok(self.store.snapshot(self.runtime_state.clone())),
             "profile.import" => {
                 config::reject_script_source(args)?;
-                if ["yaml", "url", "uri"]
-                    .iter()
-                    .filter(|key| args.get(**key).is_some())
-                    .count()
-                    != 1
-                {
-                    bail!("exactly one of yaml, url or uri is required");
-                }
-                let url = args.get("url").and_then(Value::as_str);
-                let (yaml, metadata) = match args.get("yaml").and_then(Value::as_str) {
-                    Some(yaml) => (yaml.to_string(), json!({})),
-                    None if args.get("uri").is_some() => {
-                        let proxy = uri::parse_uri(string(args, "uri")?)?;
+                let (kind, source) = config::import_source(args)?;
+                let url = (kind == config::ImportKind::Url).then_some(source);
+                let (yaml, metadata) = match kind {
+                    config::ImportKind::Yaml => (source.to_string(), json!({})),
+                    config::ImportKind::Uri => {
+                        let proxy = uri::parse_uri(source)?;
                         let node_name = proxy["name"].as_str().context("invalid proxy name")?;
                         let profile = json!({"proxies": [proxy], "proxy-groups": [{"name": "Imported", "type": "select", "proxies": [node_name]}], "rules": ["MATCH,Imported"]});
                         (serde_yaml_ng::to_string(&profile)?, json!({}))
                     }
-                    None => fetch_profile(url.context("yaml or url is required")?, cancel).await?,
+                    config::ImportKind::Url => fetch_profile(source, cancel).await?,
                 };
                 let parsed = parse_profile_yaml(&yaml)?;
                 if url.is_some() && parsed.get("proxies").is_none() && parsed.get("proxy-providers").is_none() {
@@ -941,6 +941,15 @@ impl Worker {
             "profile.select" | "profile.delete" | "profile.rename" => {
                 let id = string(args, "id")?;
                 self.store.profile(id)?;
+                if request.command == "profile.delete"
+                    && self.store.profiles.len() == 1
+                    && self.store.selected_profile_id.as_deref() == Some(id)
+                    && (self.is_running()
+                        || self.controller.child.is_some()
+                        || self.runtime_state["helperMode"] == true)
+                {
+                    bail!("stop the owned core before deleting its last active profile");
+                }
                 if request.command == "profile.delete" {
                     self.cancel_subscription(id).await;
                 }
@@ -1374,8 +1383,19 @@ impl Worker {
         self.runtime_state["status"] = if outcome.is_ok() { "stopped" } else { "failed" }.into();
         if let Err(error) = &network_restore {
             self.runtime_state["error"] = format!("network recovery required: {error:#}").into();
+        } else if let Err(error) = &outcome {
+            self.runtime_state["error"] = format!("owned core cleanup failed: {error:#}").into();
+        } else {
+            self.runtime_state
+                .as_object_mut()
+                .context("invalid runtime state")?
+                .remove("error");
         }
-        self.runtime_state["pid"] = Value::Null;
+        self.runtime_state["pid"] = if outcome.is_ok() {
+            Value::Null
+        } else {
+            json!(self.controller.child.as_ref().and_then(tokio::process::Child::id))
+        };
         self.runtime_state["socketPath"] = self.controller.socket.to_string_lossy().to_string().into();
         self.publish_state(id);
         outcome?;

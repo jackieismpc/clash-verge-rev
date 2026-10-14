@@ -113,6 +113,11 @@ struct ClientFailure: Codable, Identifiable, Sendable, Hashable, Error {
     var detail: String
     var retryable: Bool
     var id: String { code + message }
+    var needsNetworkSetup: Bool { code == "helperUnavailable" || code == "helperNotSubmitted" }
+    static func operation(code: String, detail: String) -> Self {
+        let message = code == "helperUnavailable" ? "请先准备系统网络权限" : code == "helperNotSubmitted" ? "权限服务请求未提交" : "操作失败"
+        return Self(code: code, message: message, detail: detail, retryable: code != "helperUnavailable" && code != "helperNotSubmitted")
+    }
 }
 
 struct UnlockRecord: Codable, Identifiable, Sendable, Hashable {

@@ -227,6 +227,54 @@ pub fn parse_yaml(text: &str) -> Result<Value> {
 
 const SCRIPT_MIGRATION: &str = "Custom JavaScript profiles are unsupported. Keep the original file and migrate its changes to YAML overrides; no script was executed.";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportKind {
+    Yaml,
+    Url,
+    Uri,
+}
+pub fn import_source(args: &Json) -> Result<(ImportKind, &str)> {
+    let inputs: Vec<_> = ["yaml", "url", "uri", "source"]
+        .into_iter()
+        .filter(|key| args.get(*key).is_some())
+        .collect();
+    if inputs.len() != 1 {
+        bail!("exactly one of yaml, url, uri or source is required");
+    }
+    let key = inputs[0];
+    let text = args[key]
+        .as_str()
+        .context("profile source must be text")?
+        .trim()
+        .trim_start_matches('\u{feff}')
+        .trim();
+    if text.is_empty() {
+        bail!("profile source must not be empty");
+    }
+    let kind = match key {
+        "url" => ImportKind::Url,
+        "uri" => ImportKind::Uri,
+        "yaml" => ImportKind::Yaml,
+        _ => {
+            let scheme = text.split_once("://").map(|(scheme, _)| scheme);
+            match scheme {
+                Some(scheme) if scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("http") => {
+                    ImportKind::Url
+                }
+                Some(scheme)
+                    if scheme
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"+.-".contains(&byte)) =>
+                {
+                    ImportKind::Uri
+                }
+                _ => ImportKind::Yaml,
+            }
+        }
+    };
+    Ok((kind, text))
+}
+
 pub fn reject_script_source(args: &Json) -> Result<()> {
     if args.get("sourceKind").and_then(Json::as_str) == Some("script")
         || args.get("filename").and_then(Json::as_str).is_some_and(|name| {
@@ -337,6 +385,25 @@ pub async fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn generic_import_classifies_links_without_reimplementing_protocols() {
+        for (source, kind) in [
+            ("  ss://example.invalid#node  ", ImportKind::Uri),
+            ("\u{feff}vless://sample@example.invalid:443", ImportKind::Uri),
+            ("HTTPS://example.invalid/subscription", ImportKind::Url),
+            ("proxies: [{server: https://example.invalid}]", ImportKind::Yaml),
+            ("custom://unsupported", ImportKind::Uri),
+        ] {
+            assert_eq!(import_source(&serde_json::json!({"source":source})).unwrap().0, kind);
+        }
+        for input in [
+            serde_json::json!({"source":"  "}),
+            serde_json::json!({"source":"uri://sample","yaml":"{}"}),
+            serde_json::json!({"source":12}),
+        ] {
+            assert!(import_source(&input).is_err());
+        }
+    }
     #[test]
     fn builtin_compatibility_keeps_protocol_and_nested_fields() {
         let mut yaml = parse_yaml("mode: script\nproxies: [{type: hysteria, alpn: h3, future: keep}, {type: hysteria2, alpn: h3}, {type: hysteria, alpn: [h3]}]\nFuture: {MixedCase: keep}\n").unwrap();

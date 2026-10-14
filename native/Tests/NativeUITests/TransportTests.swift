@@ -102,3 +102,87 @@ import Testing
     #expect(model.snapshot?.nodes.first { $0.id == "hk-01" }?.testRequestID != "earlier")
     await model.shutdown()
 }
+
+private actor PermissionFixture: CoreTransport {
+    nonisolated let isDemo = false
+    var state: CoreSnapshot
+    var calls: [String] = []
+    init(_ state: CoreSnapshot) { self.state = state }
+    func snapshot() -> CoreSnapshot { state.sequence += 1; return state }
+    func execute(_ command: CommandEnvelope) -> CoreSnapshot { calls.append(command.command); state.sequence += 1; return state }
+    func replace(_ state: CoreSnapshot) { self.state = state }
+}
+
+@Test @MainActor func networkPermissionPreflightDoesNotSendUnapprovedCommands() async throws {
+    var state = try await DemoTransport().snapshot()
+    state.coreStatus = "running"
+    state.networkFeatures.systemProxy = .off
+    for stage in [NetworkPermission.Stage.development, .unregistered, .approvalRequired, .approved] {
+        let fixture = PermissionFixture(state)
+        let model = AppModel(transport: fixture, permissionProbe: { NetworkPermission(stage: stage) })
+        await model.refresh()
+        await model.command("setSystemProxy", payload: ["enabled": "true"])
+        if stage == .approved {
+            #expect(await fixture.calls == ["setSystemProxy"])
+            #expect(!model.showNetworkSetup)
+        } else {
+            #expect(await fixture.calls.isEmpty)
+            #expect(model.showNetworkSetup)
+            #expect(model.snapshot?.networkFeatures.systemProxy == .off)
+        }
+        await model.shutdown()
+    }
+    #expect(!NetworkPermission(stage: .isolated).canEnable)
+    #expect(!NetworkPermission(stage: .isolated).canSetUp)
+}
+
+@Test @MainActor func failedNetworkCanBeRestoredAndHealthySnapshotClearsCoreError() async throws {
+    var state = try await DemoTransport().snapshot()
+    state.coreStatus = "failed"
+    state.networkFeatures.systemProxy = .failed
+    state.error = ClientFailure(code: "core_failed", message: "fixture", detail: "fixture", retryable: true)
+    let fixture = PermissionFixture(state)
+    let model = AppModel(transport: fixture, permissionProbe: { NetworkPermission(stage: .development) })
+    await model.refresh()
+    #expect(model.failure?.code == "core_failed")
+    await model.command("toggleSystemProxy")
+    #expect(await fixture.calls == ["toggleSystemProxy"])
+    #expect(!model.showNetworkSetup)
+    state.coreStatus = "stopped"; state.error = nil; state.sequence += 10
+    await fixture.replace(state)
+    await model.refresh()
+    #expect(model.failure == nil)
+    await model.shutdown()
+}
+
+@Test @MainActor func emptyConfigurationOffersImportBeforeStartingCore() async throws {
+    let state = try await DemoTransport(scenario: .empty).snapshot()
+    let fixture = PermissionFixture(state)
+    let model = AppModel(transport: fixture, permissionProbe: { NetworkPermission(stage: .approved) })
+    await model.refresh()
+    await model.command("startCore")
+    #expect(model.showImport)
+    #expect(await fixture.calls.isEmpty)
+    await model.shutdown()
+}
+
+@Test func installationCommandQuotesPathsAndRejectsUnknownDataLayout() {
+    let command = NetworkPermission.installationCommand(dataDirectory: "/Users/sample/a'b/.work/native-ui/data")
+    #expect(command?.contains("a'\\''b") == true)
+    #expect(NetworkPermission.installationCommand(dataDirectory: "/private/unknown") == nil)
+}
+
+@Test @MainActor func existingPermissionSheetDoesNotRequestAnotherPresentation() async throws {
+    let state = try await DemoTransport().snapshot()
+    let fixture = PermissionFixture(state)
+    let model = AppModel(transport: fixture, permissionProbe: { NetworkPermission(stage: .unregistered) })
+    await model.refresh()
+    model.networkSetupOpened()
+    await model.command("setSystemProxy", payload: ["enabled": "true"])
+    #expect(!model.showNetworkSetup)
+    model.networkSetupClosed()
+    await model.command("setSystemProxy", payload: ["enabled": "true"])
+    #expect(model.showNetworkSetup)
+    #expect(await fixture.calls.isEmpty)
+    await model.shutdown()
+}

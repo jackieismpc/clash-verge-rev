@@ -76,6 +76,36 @@ pub struct HelperReply {
     pub error: Option<String>,
 }
 
+#[derive(Debug)]
+pub struct BeforeSubmission {
+    pub unavailable: bool,
+    cause: anyhow::Error,
+}
+impl std::fmt::Display for BeforeSubmission {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.unavailable {
+            write!(
+                output,
+                "native helper is unavailable; install the app and register/approve its network service in Settings: {}",
+                self.cause
+            )
+        } else {
+            write!(output, "helper request was not submitted: {}", self.cause)
+        }
+    }
+}
+impl std::error::Error for BeforeSubmission {}
+pub fn may_have_applied(error: &anyhow::Error) -> bool {
+    !error.is::<BeforeSubmission>()
+}
+pub(crate) fn before(error: anyhow::Error, unavailable: bool) -> anyhow::Error {
+    BeforeSubmission {
+        unavailable,
+        cause: error,
+    }
+    .into()
+}
+
 /// Every command is blocked in integrationTest, including contact with a daily/system helper.
 pub fn request(command: &HelperCommand, integration_test: bool) -> Result<HelperStatus> {
     if integration_test {
@@ -83,12 +113,16 @@ pub fn request(command: &HelperCommand, integration_test: bool) -> Result<Helper
     }
     let body = serde_json::to_vec(command)?;
     if body.len() > MAX_HELPER_BYTES {
-        bail!("helper request exceeds limit");
+        return Err(before(anyhow::anyhow!("helper request exceeds limit"), false));
     }
-    let mut stream = UnixStream::connect(HELPER_SOCKET).context("native helper is not registered or approved")?;
-    verify_root_peer(&stream)?;
-    stream.set_read_timeout(Some(Duration::from_secs(60)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(3)))?;
+    let mut stream = UnixStream::connect(HELPER_SOCKET).map_err(|error| before(error.into(), true))?;
+    verify_root_peer(&stream).map_err(|error| before(error, false))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .map_err(|error| before(error.into(), false))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(3)))
+        .map_err(|error| before(error.into(), false))?;
     stream.write_all(&(body.len() as u32).to_be_bytes())?;
     stream.write_all(&body)?;
     let mut length = [0; 4];

@@ -15,6 +15,8 @@ scripts/native-core-assets.sh
 scripts/native-ui-build.sh
 open '.work/native-ui/Clash Native.app'
 scripts/native-ui-test.sh
+# One-command developer build/open, after quitting a prior native instance:
+scripts/native-ui-run.sh
 # Visual fixture only:
 open -n '.work/native-ui/Clash Native.app' --args --demo
 ```
@@ -69,7 +71,10 @@ sudo scripts/install-local.sh
 open '/Applications/Clash Native.app'
 ```
 
-Register the helper from Settings → Network and approve it in System Settings.
+The toolbar and Settings share a live permission state. Development builds show
+an installation command; installed builds offer registration and approval guidance.
+An unapproved switch opens setup before submitting any network mutation. Register
+the helper from Settings → Network and approve it in System Settings.
 The installed bundle must be root-owned and non-writable to other users. Installation
 alone does not register services or modify networking. Quit before updating an
 installation; reopen both application and service after replacement. Login startup

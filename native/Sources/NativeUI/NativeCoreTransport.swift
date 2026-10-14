@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import NativeCoreC
 
 enum WireValue: Codable, Sendable, Equatable {
     case object([String: WireValue]), array([WireValue]), string(String), number(Double), bool(Bool), null
@@ -50,6 +51,7 @@ struct NativeCoreOptions: Sendable {
     var libraryPath: String
     var dataDirectory: String
     var mihomoPath: String?
+    var hostPath: String? = nil
     var mixedPort: UInt16 = 17890
     var executionMode: ExecutionMode = .interactive
     var integrationRoot: String? = nil
@@ -62,7 +64,8 @@ struct NativeCoreOptions: Sendable {
         return Self(
             libraryPath: environment["CVN_LIBRARY_PATH"] ?? bundle.appendingPathComponent("Frameworks/libclash_verge_native_core.dylib").path,
             dataDirectory: data,
-            mihomoPath: environment["CVN_MIHOMO_PATH"] ?? bundle.appendingPathComponent("Resources/mihomo").path
+            mihomoPath: environment["CVN_MIHOMO_PATH"] ?? bundle.appendingPathComponent("Resources/mihomo").path,
+            hostPath: environment["CVN_HOST_PATH"] ?? bundle.appendingPathComponent("Helpers/clash-native-helper").path
         )
     }
 }
@@ -70,22 +73,17 @@ struct NativeCoreOptions: Sendable {
 // This object is confined to NativeCoreTransport's executor. It never crosses
 // the main actor, and its handle is destroyed only after pending calls finish.
 private final class NativeLibrary {
-    typealias Create = @convention(c) (UnsafePointer<CChar>?) -> UnsafeMutableRawPointer?
-    typealias Read = @convention(c) (UnsafeMutableRawPointer?) -> UnsafeMutablePointer<CChar>?
-    typealias Submit = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> Int32
-    typealias Free = @convention(c) (UnsafeMutablePointer<CChar>?) -> Void
-    typealias Destroy = @convention(c) (UnsafeMutableRawPointer?) -> Void
-    typealias LastError = @convention(c) () -> UnsafeMutablePointer<CChar>?
-    typealias Version = @convention(c) () -> UInt32
     let library: UnsafeMutableRawPointer
-    let handle: UnsafeMutableRawPointer
-    let submit: Submit
-    let cancel: Submit
-    let snapshot: Read
-    let nextEvent: Read
-    let free: Free
-    let stop: Destroy
-    let destroy: Destroy
+    let handle: OpaquePointer
+    let submit: CvnInputFn
+    let cancel: CvnInputFn
+    let snapshot: CvnReadFn
+    let nextEvent: CvnReadFn
+    let free: CvnReleaseFn
+    let stop: CvnCloseFn
+    let destroy: CvnCloseFn
+    let lastError: CvnErrorFn
+    var closed = false
 
     init(options: NativeCoreOptions) throws {
         guard let library = dlopen(options.libraryPath, RTLD_NOW | RTLD_LOCAL) else {
@@ -96,38 +94,47 @@ private final class NativeLibrary {
                 guard let address = dlsym(library, name) else { throw ClientFailure(code: "abi_mismatch", message: "业务库接口不完整", detail: name, retryable: false) }
                 return unsafeBitCast(address, to: T.self)
             }
-            let version = try symbol("cvn_abi_version", Version.self)
-            guard version() == 1 else { throw ClientFailure(code: "abi_mismatch", message: "业务库版本不兼容", detail: "Expected ABI 1", retryable: false) }
-            let create = try symbol("cvn_create", Create.self)
-            let lastError = try symbol("cvn_last_error", LastError.self)
-            self.free = try symbol("cvn_free_string", Free.self)
-            self.submit = try symbol("cvn_submit", Submit.self)
-            self.cancel = try symbol("cvn_cancel", Submit.self)
-            self.snapshot = try symbol("cvn_snapshot", Read.self)
-            self.nextEvent = try symbol("cvn_next_event", Read.self)
-            self.stop = try symbol("cvn_stop", Destroy.self)
-            self.destroy = try symbol("cvn_destroy", Destroy.self)
+            let version = try symbol("cvn_abi_version", CvnVersionFn.self)
+            guard version() == 2 else { throw ClientFailure(code: "abi_mismatch", message: "业务库版本不兼容", detail: "Expected ABI 2", retryable: false) }
+            let create = try symbol("cvn_create", CvnCreateFn.self)
+            self.lastError = try symbol("cvn_last_error", CvnErrorFn.self)
+            self.free = try symbol("cvn_free_buffer", CvnReleaseFn.self)
+            self.submit = try symbol("cvn_submit", CvnInputFn.self)
+            self.cancel = try symbol("cvn_cancel", CvnInputFn.self)
+            self.snapshot = try symbol("cvn_snapshot", CvnReadFn.self)
+            self.nextEvent = try symbol("cvn_next_event", CvnReadFn.self)
+            self.stop = try symbol("cvn_stop", CvnCloseFn.self)
+            self.destroy = try symbol("cvn_destroy", CvnCloseFn.self)
             var config: [String: WireValue] = ["version": .number(1), "dataDir": .string(options.dataDirectory), "mixedPort": .number(Double(options.mixedPort)), "executionMode": .string(options.executionMode.rawValue)]
             if let root = options.integrationRoot { config["integrationRoot"] = .string(root) }
             if let path = options.mihomoPath { config["mihomoPath"] = .string(path) }
+            if let path = options.hostPath { config["hostPath"] = .string(path) }
             let bytes = try JSONEncoder().encode(WireValue.object(config))
-            let text = String(decoding: bytes, as: UTF8.self)
-            guard let handle = text.withCString({ create($0) }) else {
-                let pointer = lastError()
-                let detail = pointer.map { String(cString: $0) } ?? "cvn_create failed"
-                free(pointer)
+            guard let handle = bytes.withUnsafeBytes({ create($0.bindMemory(to: UInt8.self).baseAddress, UInt64($0.count)) }) else {
+                let buffer = lastError()
+                let detail = buffer.length <= 4096 ? buffer.data.map { String(decoding: UnsafeBufferPointer(start: $0, count: Int(buffer.length)), as: UTF8.self) } ?? "cvn_create failed" : "Invalid native error buffer"
+                _ = free(buffer)
                 throw ClientFailure(code: "initialization_failed", message: "无法初始化独立运行目录", detail: detail, retryable: true)
             }
-            self.handle = handle
-            self.library = library
+            self.handle = handle; self.library = library
         } catch { dlclose(library); throw error }
     }
-    deinit { destroy(handle); dlclose(library) }
-    func read(_ pointer: UnsafeMutablePointer<CChar>?) throws -> NativeEnvelope? {
-        guard let pointer else { return nil }
-        defer { free(pointer) }
-        let bytes = Data(bytes: pointer, count: strlen(pointer))
-        let envelope = try JSONDecoder().decode(NativeEnvelope.self, from: bytes)
+    deinit {
+        if !closed { _ = stop(handle); closed = destroy(handle) == 0 }
+        // Keep executable code mapped when cleanup is still running or failed.
+        if closed { dlclose(library) }
+    }
+    func input(_ function: CvnInputFn, _ bytes: Data) -> Int32 {
+        bytes.withUnsafeBytes { function(handle, $0.bindMemory(to: UInt8.self).baseAddress, UInt64($0.count)) }
+    }
+    func read(_ buffer: CvnBuffer) throws -> NativeEnvelope? {
+        defer { _ = free(buffer) }
+        if buffer.status == 4 { return nil }
+        guard buffer.status == 0, let length = Int(exactly: buffer.length), length <= 128 * 1024 * 1024,
+              let pointer = buffer.data else {
+            throw ClientFailure(code: "abi_buffer", message: "业务库返回无效缓冲", detail: "Buffer status \(buffer.status)", retryable: true)
+        }
+        let envelope = try JSONDecoder().decode(NativeEnvelope.self, from: Data(bytes: pointer, count: length))
         guard envelope.version == 1 else { throw ClientFailure(code: "abi_mismatch", message: "业务数据版本不兼容", detail: "Expected schema 1", retryable: false) }
         return envelope
     }
@@ -289,11 +296,18 @@ actor NativeCoreTransport: CoreTransport {
     func shutdown() async {
         stopped = true
         let owned = library
-        if let owned { owned.stop(owned.handle) }
-        while !pending.isEmpty { try? await Task.sleep(for: .milliseconds(25)) }
+        if let owned { _ = owned.stop(owned.handle) }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(30))
+        while !pending.isEmpty && ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(25)) }
+        if let owned {
+            while true {
+                let status = owned.destroy(owned.handle)
+                if status == 0 { owned.closed = true; break }
+                if status != 2 || ContinuousClock.now >= deadline { failure = ClientFailure(code: "cleanup_failed", message: "清理尚未完成", detail: "Native cleanup status \(status)", retryable: true); break }
+                try? await Task.sleep(for: .milliseconds(25))
+            }
+        }
         library = nil
-        // Keep the library loaded until every submitted operation has unwound.
-        _ = owned
         results.removeAll()
     }
     func setVisibility(_ visible: Bool) async {
@@ -310,9 +324,9 @@ actor NativeCoreTransport: CoreTransport {
         let isRead = ["proxy.delay", "media.check", "media.checkAll"].contains(command)
             || (command == "core.request" && args["method"] == .string("GET"))
         let request = WireValue.object(["version": .number(1), "id": .string(id), "command": .string(command), "args": .object(args), "coreGeneration": .number(Double(generation))])
-        let json = String(decoding: try JSONEncoder().encode(request), as: UTF8.self)
-        let status = json.withCString { library.submit(library.handle, $0) }
+        let status = library.input(library.submit, try JSONEncoder().encode(request))
         guard status == 0 else { throw ClientFailure(code: "submit_\(status)", message: "操作未能进入任务队列", detail: "Queue full, duplicate request, or stopped runtime", retryable: true) }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(command == "media.checkAll" ? 180 : 120))
         pending.insert(id)
         defer { pending.remove(id); results.removeValue(forKey: id) }
         do {
@@ -330,10 +344,11 @@ actor NativeCoreTransport: CoreTransport {
                     return result.data ?? .null
                 }
                 try Task.checkCancellation()
+                if ContinuousClock.now >= deadline { throw ClientFailure(code: "request_timeout", message: "操作等待超时", detail: "请刷新确认当前状态，已提交的配置可能已经生效。", retryable: true) }
                 try await Task.sleep(for: .milliseconds(25))
             }
         } catch {
-            id.withCString { _ = library.cancel(library.handle, $0) }
+            _ = library.input(library.cancel, Data(id.utf8))
             throw error
         }
     }

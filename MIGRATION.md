@@ -203,3 +203,72 @@ Swift 拥有展示和编辑草稿；业务缺口用能力状态表达，不伪�
   外部样本复查仍需进行；模拟适配器不代替这些结论。
 - [ ] 性能优化有整产品 GUI/helper/mihomo 可复现内存/CPU/吞吐测量。
   本轮只记录节点延迟/TLS/首包与有界缓存行为，不将低延迟等同高吞吐。
+
+## M6：生产稳定性与 FFI 收紧
+
+2026-10-14 用户要求继续稳定化与冗余清理，FFI 优先；Go 内核固定，
+系统网络真测仍按 M4.3V 的用户约定跳过。
+
+- [x] M6.1：ABI 2 使用显式 UTF-8 字节长度、受控句柄与缓冲所有权；
+  Swift 直接导入唯一 C 头文件，删除重复手写 ABI 定义和 NUL 扫描。
+  完成标准：非法/过期句柄、重复释放、输入边界、版本不匹配、并发调用、
+  创建/销毁/重新打开及真实 Swift 桥接通过；JSON schema 仍为 1。
+- [x] M6.2：限制命令积压字节数，确保停止与故障能结束所有接受的请求；
+  Swift 请求有明确等待上限、取消及退出不无限轮询。
+  完成标准：任务异常、积压、停止并发及恢复回归通过。
+- [x] M6.3：限制 controller HTTP/WebSocket 数据与后台事件缓存；
+  清理不再被使用的兼容入口与重复逻辑，依据真实引用删除。
+  完成标准：超限/断流/恢复测试和原有功能工作流通过。
+
+- [x] M6.4：系统代理/DNS 迁到独立 helper 的持久租约；监护 GUI 与核心
+  进程身份，异常结束自动恢复，服务重启先回收旧 journal/所属引擎。
+  TUN 先以无路由模式启动、写入进程恢复记录后才启用；使用 redir-host
+  避免退出后系统缓存残留 Fake IP。关闭代理/TUN 不重新应用本应用 DNS。
+  完成标准：DNS/DHCP/外部编辑/部分 apply 失败重试、租约失效、PID 复用
+  与恢复顺序的确定性测试通过；真实 OS 验收继续按 M4.3V 留给用户。
+- [x] M6.5：安装/卸载顺序与无残留检查。卸载先注销服务和登录启动、恢复
+  所属配置、确认所属引擎退出，再删包、helper 数据、运行目录、偏好。
+  恢复失败停止删除，源仓库/全局工具链/日常 Clash Verge 均不触碰。
+  完成标准：脚本语法、路径/顺序、模拟卸载失败场景通过；本机真实安装
+  卸载由用户执行，不用模拟测试冒充正式系统验收。
+- [x] M6.6：本地规则放在 MATCH 前，明确替换 fallback，避免无效后置规则；
+  删除匹配规范化、去重、订阅刷新/备份/重启保留，错误事务不改有效规则。
+  完成标准：最终 mihomo 规则顺序和真实请求命中验证通过。
+
+M6 验证证据（2026-10-14）：
+
+- `scripts/check-local.sh`：源码 audit、fmt、Clippy `-D warnings`、Rust 及
+  Swift 工作流通过：76 核心 + 3 隔离 runner + 4 构建工具 + 4 更新库的
+  Rust 测试、11 项 Swift 测试；日志 `.work/m6-check-final.log`。
+- `NATIVE_BUILD_PROFILE=release scripts/native-ui-test.sh`：11 项优化构建
+  Swift/真实桥接测试通过；`.work/m6-release-bridge.log`。
+- `scripts/native-ui-build.sh`：正式 arm64 包和 `codesign --verify --deep
+  --strict` 通过；`.work/m6-product-build.log`。产物与测试数据均 Git 忽略。
+- `scripts/installation-test.sh`：拒绝 symlink，注销失败/恢复失败不删除，
+  成功恢复先于范围限定删除，外部哨兵文件保留。未调用真实 sudo/SM 注销。
+- 实际向自有测试父进程发送 SIGKILL，所属普通 mihomo、socket、TCP 监听
+  随监护退出；未按进程名称杀进程。特权租约的进程丢失/PID 复用/DHCP恢复
+  使用模拟后端；helper 重启和真实 TUN 路由回收仍需 M4.3V 人工验证。
+- 真正的 Swift → ABI 2 → 固定 mihomo：本地 HTTP 目标 DIRECT 成功，追加
+  REJECT 后目标未收到请求；非法 MATCH 事务不改有效规则，备份恢复及
+  内核重启后仍拦截；ABI 1 在创建前被拒绝。
+- C 头文件经 clang 实际编译验证大小/偏移；FFI 并发销毁、重复释放、伪造
+  缓冲、非法 UTF-8、超长输入及输出池满后接受结果可重读通过。命令积压
+  按字节拒绝，worker 故障结束已接受 ID，重复完成不会重复发布。
+- Unix controller 超限 chunked HTTP 与 WebSocket 后下一请求/重连恢复；
+  指标合并和日志字节上限测试通过。Swift 请求有 deadline，退出等待有上限；
+  未确认 Rust 已完成时保留 dylib 映射，避免后台线程执行已卸载代码。
+- 旧 GUI 网络 journal 不静默忽略；helper 从签名 bundle 的默认数据路径
+  导入 root journal 后恢复。中断的 pending checkpoint 可恢复，symlink
+  staging 被拒绝；部分 commit/apply 失败的持久恢复和外部 DNS 编辑保留。
+- 安装/卸载说明同步 README；仅关闭窗口仍保持后台代理，退出或关闭代理/
+  TUN 才恢复对应网络。原生运行目录、缓存与偏好属于卸载范围，开发源码与
+  编译缓存保留；自定义开发目录需自行处理。
+
+正式构建/验收前后只读快照 `.work/m6-network-check/`：系统代理与 DNS
+字节一致；路由的目标/网关/接口集合一致，但 en0 邻居缓存标志和到期计时
+有变化，未将原始路由快照记为完全一致，也未执行全局恢复。
+
+M6 完成仅指实现与上述自动回归，未更改 M4.3V 的真实 OS 验收状态。
+未安装/注销服务，未改系统代理、DNS、TUN/路由，未刷新全局 DNS 缓存。
+本轮提交主题：`fix(native): harden owned network recovery and ABI lifecycle`。

@@ -10,6 +10,8 @@ use std::{
     time::Duration,
 };
 
+pub use crate::supervisor::supervise;
+
 pub const HELPER_ID: &str = "io.github.jackieismpc.clash-native.helper";
 pub const HELPER_SOCKET: &str = "/var/run/io.github.jackieismpc.clash-native.helper.sock";
 pub const HELPER_DATA: &str = "/var/db/io.github.jackieismpc.clash-native.helper";
@@ -23,6 +25,16 @@ pub const MAX_HELPER_BYTES: usize = 4 * 1024 * 1024;
 )]
 pub enum HelperCommand {
     Status,
+    NetworkSet {
+        owner: String,
+        mixed_port: u16,
+        core_pid: u32,
+        proxy: bool,
+        dns_servers: Vec<String>,
+    },
+    NetworkRestore {
+        owner: String,
+    },
     Start {
         owner: String,
         generation: u64,
@@ -55,6 +67,8 @@ pub struct HelperStatus {
     pub pid: Option<u32>,
     pub private_socket: Option<String>,
     pub message: String,
+    #[serde(default)]
+    pub network: Option<Value>,
 }
 #[derive(Serialize, Deserialize)]
 pub struct HelperReply {
@@ -348,6 +362,9 @@ pub fn prepare_config(
         "log-level",
         "ipv6",
         "find-process-mode",
+        "hosts",
+        "sub-rules",
+        "sniffer",
         "global-client-fingerprint",
         "tcp-concurrent",
         "unified-delay",
@@ -366,9 +383,12 @@ pub fn prepare_config(
     );
     output.insert("secret".into(), json!(secret));
     output.insert("tun".into(), json!({"enable":true,"stack":"mixed","device":"utun","auto-route":true,"auto-detect-interface":true,"dns-hijack":["any:53"]}));
-    let mut dns = json!({"enable":true,"ipv6":false,"enhanced-mode":"fake-ip","fake-ip-range":"198.18.0.1/16","nameserver":["https://1.1.1.1/dns-query","https://8.8.8.8/dns-query"]});
+    let mut dns = json!({"enable":true,"ipv6":false,"enhanced-mode":"redir-host","nameserver":["https://1.1.1.1/dns-query","https://8.8.8.8/dns-query"]});
     if let Some(source) = input.get("dns").and_then(Value::as_object) {
         for key in [
+            "ipv6",
+            "cache-algorithm",
+            "direct-nameserver-follow-policy",
             "nameserver",
             "default-nameserver",
             "fallback",
@@ -395,6 +415,9 @@ pub fn prepare_config(
     })
 }
 
+#[path = "helper_network.rs"]
+pub(crate) mod network;
+
 #[path = "helper_controller.rs"]
 mod helper_controller;
 
@@ -402,7 +425,7 @@ mod helper_controller;
 #[path = "helper_macos.rs"]
 mod macos;
 #[cfg(target_os = "macos")]
-pub use macos::serve;
+pub use macos::{recover_for_uninstall, serve};
 
 #[cfg(test)]
 mod tests {
@@ -427,6 +450,7 @@ mod tests {
             generation: Some(8),
             pid: Some(42),
             private_socket: Some("/fixture/core.sock".into()),
+            network: None,
             message: String::new(),
         };
         assert!(verify_owned_stop(&status, 501, "native-mac:fixture", 8).is_ok());

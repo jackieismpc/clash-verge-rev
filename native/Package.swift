@@ -6,7 +6,8 @@ let package = Package(
     platforms: [.macOS(.v26)],
     products: [.executable(name: "ClashNative", targets: ["NativeUI"])],
     targets: [
-        .executableTarget(name: "NativeUI"),
+        .systemLibrary(name: "NativeCoreC"),
+        .executableTarget(name: "NativeUI", dependencies:["NativeCoreC"]),
         .testTarget(name: "NativeUITests", dependencies: ["NativeUI"]),
     ]
 )

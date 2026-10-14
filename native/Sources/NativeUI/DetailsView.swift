@@ -142,7 +142,7 @@ struct LocalRuleEditor: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("持久本地规则覆盖").font(.title2)
-            Text("每行一条 mihomo 规则。删除按完整文本匹配源规则；订阅刷新保留这些覆盖。")
+            Text("每行一条 mihomo 规则。删除忽略逗号两侧空白；后置规则放在源 MATCH 前，末尾 MATCH 可替换默认出口。订阅刷新保留覆盖。")
                 .font(.caption).foregroundStyle(.secondary)
             ruleInput("前置规则（优先匹配）", text: $prepend)
             ruleInput("后置规则", text: $append)

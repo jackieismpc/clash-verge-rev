@@ -1,10 +1,8 @@
 use super::*;
+use std::io::Write;
 use std::path::PathBuf;
-use std::{
-    ffi::{CStr, CString},
-    io::Write,
-};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+static FFI_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 struct TestDir(PathBuf);
 impl TestDir {
@@ -25,6 +23,7 @@ impl TestDir {
             version: 1,
             data_dir: self.0.clone(),
             mihomo_path: None,
+            host_path: None,
             mixed_port: Some(19882),
             execution_mode: ExecutionMode::Interactive,
             integration_root: None,
@@ -342,9 +341,9 @@ fn old_stream_generation_never_enters_new_snapshot_queue() {
     assert!(lock(&shared.events).is_empty());
     shared.stream(2, "traffic", Ok(json!({"up":30,"down":50})));
     let event = lock(&shared.events).pop_front().unwrap();
-    assert_eq!(event["coreGeneration"], 2);
-    assert_eq!(event["revision"], 4);
-    assert_eq!(event["data"]["value"]["up"], 30);
+    assert_eq!(event.value["coreGeneration"], 2);
+    assert_eq!(event.value["revision"], 4);
+    assert_eq!(event.value["data"]["value"]["up"], 30);
 }
 
 #[tokio::test]
@@ -396,7 +395,7 @@ async fn unix_http_reload_rolls_back_after_persistence_failure() {
         shutdown: Notify::new(),
     });
     let mut worker = Worker {
-        network: network::NetworkSession::new(&dir.0, ExecutionMode::Interactive).unwrap(),
+        network: network_client::NetworkClient::new(&dir.0, ExecutionMode::Interactive).unwrap(),
         options: dir.options(),
         store,
         runtime_state,
@@ -427,33 +426,39 @@ async fn unix_http_reload_rolls_back_after_persistence_failure() {
 
 #[test]
 fn ffi_allocations_null_inputs_shutdown_and_directory_release() {
+    let _serial = lock(&FFI_TEST_LOCK);
     let dir = TestDir::new();
-    let config = CString::new(json!({"version":1,"dataDir":dir.0,"mixedPort":19884}).to_string()).unwrap();
+    let config = json!({"version":1,"dataDir":dir.0,"mixedPort":19884}).to_string();
     unsafe {
-        assert!(ffi::cvn_create(std::ptr::null()).is_null());
+        assert!(ffi::cvn_create(std::ptr::null(), 1).is_null());
         let error = ffi::cvn_last_error();
-        assert!(!error.is_null());
-        assert!(CStr::from_ptr(error).to_str().unwrap().contains("null string"));
-        ffi::cvn_free_string(error);
-        let handle = ffi::cvn_create(config.as_ptr());
+        assert_eq!(error.status, 0);
+        ffi::cvn_free_buffer(error);
+        let handle = ffi::cvn_create(config.as_ptr(), config.len() as u64);
         assert!(!handle.is_null());
         for _ in 0..100 {
             let data = ffi::cvn_snapshot(handle);
-            let value: Value = serde_json::from_str(CStr::from_ptr(data).to_str().unwrap()).unwrap();
+            assert_eq!(data.status, 0);
+            let value: Value =
+                serde_json::from_slice(std::slice::from_raw_parts(data.data, data.length as usize)).unwrap();
             assert_eq!(value["version"], 1);
-            ffi::cvn_free_string(data);
+            assert_eq!(ffi::cvn_free_buffer(data), 0);
+            assert_eq!(ffi::cvn_free_buffer(data), 0);
         }
-        assert_eq!(ffi::cvn_submit(handle, std::ptr::null()), 1);
-        ffi::cvn_stop(handle);
-        let request =
-            CString::new(json!({"version":1,"id":"late","command":"snapshot","args":{}}).to_string()).unwrap();
-        assert_eq!(ffi::cvn_submit(handle, request.as_ptr()), 3);
-        ffi::cvn_destroy(handle);
-        ffi::cvn_destroy(std::ptr::null_mut());
-        ffi::cvn_free_string(std::ptr::null_mut());
-        let reopened = ffi::cvn_create(config.as_ptr());
+        assert_eq!(ffi::cvn_submit(handle, std::ptr::null(), 1), 1);
+        assert_eq!(ffi::cvn_stop(handle), 0);
+        let request = json!({"version":1,"id":"late","command":"snapshot","args":{}}).to_string();
+        assert_eq!(ffi::cvn_submit(handle, request.as_ptr(), request.len() as u64), 3);
+        while ffi::cvn_destroy(handle) == 2 {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(ffi::cvn_snapshot(handle).status, 1);
+        assert_eq!(ffi::cvn_destroy(handle), 0);
+        let reopened = ffi::cvn_create(config.as_ptr(), config.len() as u64);
         assert!(!reopened.is_null());
-        ffi::cvn_destroy(reopened);
+        while ffi::cvn_destroy(reopened) == 2 {
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 }
 
@@ -498,7 +503,7 @@ async fn delay_batch_runs_concurrently_and_publishes_each_result() {
         shutdown: Notify::new(),
     });
     let mut worker = Worker {
-        network: network::NetworkSession::new(&dir.0, ExecutionMode::Interactive).unwrap(),
+        network: network_client::NetworkClient::new(&dir.0, ExecutionMode::Interactive).unwrap(),
         options: dir.options(),
         store,
         runtime_state,
@@ -534,7 +539,7 @@ async fn delay_batch_runs_concurrently_and_publishes_each_result() {
     assert!(
         lock(&shared.events)
             .iter()
-            .all(|event| event["data"]["stream"] == "delay" && event["timestamp"].is_number())
+            .all(|event| event.value["data"]["stream"] == "delay" && event.value["timestamp"].is_number())
     );
     fixture.await.unwrap();
 }
@@ -564,7 +569,7 @@ async fn slow_delay_does_not_block_snapshot_or_owned_stop() {
         shutdown: Notify::new(),
     });
     let mut worker = Worker {
-        network: network::NetworkSession::new(&dir.0, ExecutionMode::Interactive).unwrap(),
+        network: network_client::NetworkClient::new(&dir.0, ExecutionMode::Interactive).unwrap(),
         options: dir.options(),
         store,
         runtime_state,
@@ -574,6 +579,16 @@ async fn slow_delay_does_not_block_snapshot_or_owned_stop() {
         scheduler: Scheduler::default(),
         subscription: None,
     };
+    for id in ["delay", "read", "stop"] {
+        lock(&shared.pending).insert(
+            id.into(),
+            Pending {
+                token: Arc::new(Cancellation::default()),
+                bytes: 100,
+                response_bytes: 1024,
+            },
+        );
+    }
     let (sender, receiver) = mpsc::channel(8);
     let owner = tokio::spawn(async move { worker.serve(receiver).await });
     sender
@@ -604,7 +619,7 @@ async fn slow_delay_does_not_block_snapshot_or_owned_stop() {
     tokio::time::timeout(Duration::from_secs(2), async {
         while lock(&shared.events)
             .iter()
-            .filter(|event| event["kind"] == "result")
+            .filter(|event| event.value["kind"] == "result")
             .count()
             < 3
         {
@@ -616,19 +631,19 @@ async fn slow_delay_does_not_block_snapshot_or_owned_stop() {
     {
         let events = lock(&shared.events);
         assert!(
-            events
-                .iter()
-                .any(|event| event["id"] == "read" && event["kind"] == "result" && event["ok"] == true)
+            events.iter().any(|event| event.value["id"] == "read"
+                && event.value["kind"] == "result"
+                && event.value["ok"] == true)
+        );
+        assert!(
+            events.iter().any(|event| event.value["id"] == "stop"
+                && event.value["kind"] == "result"
+                && event.value["ok"] == true)
         );
         assert!(
             events
                 .iter()
-                .any(|event| event["id"] == "stop" && event["kind"] == "result" && event["ok"] == true)
-        );
-        assert!(
-            events
-                .iter()
-                .any(|event| event["id"] == "delay" && event["error"]["code"] == "cancelled")
+                .any(|event| event.value["id"] == "delay" && event.value["error"]["code"] == "cancelled")
         );
     }
     shared.shutdown.notify_one();
@@ -827,7 +842,7 @@ async fn core_activation_rolls_back_failed_persistence_and_restores_bundled_base
     options.mihomo_path = Some(binary);
     options.mixed_port = Some(port);
     let mut worker = Worker {
-        network: network::NetworkSession::new(&dir.0, ExecutionMode::Interactive).unwrap(),
+        network: network_client::NetworkClient::new(&dir.0, ExecutionMode::Interactive).unwrap(),
         options,
         store,
         runtime_state: state,
@@ -867,4 +882,247 @@ async fn core_activation_rolls_back_failed_persistence_and_restores_bundled_base
     worker.stop_core("stop").await.unwrap();
     assert!(!socket.exists());
     assert!(std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).is_ok());
+}
+
+#[test]
+fn ffi_spans_ownership_and_concurrent_destroy_are_checked() {
+    let _serial = lock(&FFI_TEST_LOCK);
+    fn assert_thread_safe<T: Send + Sync>() {}
+    assert_thread_safe::<Client>();
+    assert_eq!(std::mem::size_of::<ffi::CvnBuffer>(), 32);
+    assert_eq!(std::mem::offset_of!(ffi::CvnBuffer, status), 24);
+    let dir = TestDir::new();
+    let options = json!({"version":1,"dataDir":dir.0}).to_string();
+    unsafe {
+        assert!(ffi::cvn_create(std::ptr::without_provenance(1), 65537).is_null());
+        let handle = ffi::cvn_create(options.as_ptr(), options.len() as u64);
+        assert!(!handle.is_null());
+        let invalid = [0xffu8];
+        assert_eq!(ffi::cvn_submit(handle, invalid.as_ptr(), 1), 1);
+        let buffer = ffi::cvn_snapshot(handle);
+        assert_eq!(buffer.status, 0);
+        assert_eq!(
+            ffi::cvn_free_buffer(ffi::CvnBuffer {
+                length: buffer.length + 1,
+                ..buffer
+            }),
+            1
+        );
+        assert_eq!(ffi::cvn_free_buffer(buffer), 0);
+        assert_eq!(ffi::cvn_free_buffer(buffer), 0);
+        let request = json!({"version":1,"id":"中文\0id","command":"snapshot","args":{}}).to_string();
+        assert_eq!(ffi::cvn_submit(handle, request.as_ptr(), request.len() as u64), 0);
+        let address = handle as usize;
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    for _ in 0..100 {
+                        let buffer = ffi::cvn_snapshot(std::ptr::without_provenance_mut(address));
+                        assert!([0, 1].contains(&buffer.status));
+                        ffi::cvn_free_buffer(buffer);
+                    }
+                })
+            })
+            .collect();
+        assert_eq!(ffi::cvn_stop(handle), 0);
+        let status = ffi::cvn_destroy(handle);
+        assert!([0, 2].contains(&status));
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        while ffi::cvn_destroy(handle) == 2 {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(ffi::cvn_snapshot(handle).status, 1);
+    }
+}
+
+#[test]
+fn supervisor_reaps_owned_mihomo_after_parent_sigkill() {
+    use std::io::{BufRead, BufReader};
+    let dir = TestDir::integration();
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let supervisor = workspace.join(".work/target/aarch64-apple-darwin/debug/clash-native-helper");
+    assert!(supervisor.is_file(), "build the native helper before checks");
+    let fixture = dir.0.join("parent-fixture");
+    let compiler = std::process::Command::new(std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into()))
+        .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/supervisor_parent.rs"))
+        .arg("-o")
+        .arg(&fixture)
+        .output()
+        .unwrap();
+    assert!(compiler.status.success());
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let socket = dir.0.join("c.sock");
+    let config = dir.0.join("runtime.yaml");
+    std::fs::create_dir_all(dir.0.join("tmp")).unwrap();
+    std::fs::write(&config,format!("mixed-port: {port}\nbind-address: 127.0.0.1\nallow-lan: false\nexternal-controller-unix: {}\ntun: {{enable: false}}\ndns: {{enable: false}}\nproxies: []\nrules: ['MATCH,DIRECT']\n",socket.display())).unwrap();
+    let spec = serde_json::to_string(&crate::supervisor::Specification {
+        binary: workspace.join(".work/engines/mihomo"),
+        home: dir.0.clone(),
+        config,
+        integration: true,
+    })
+    .unwrap();
+    let mut parent = std::process::Command::new(fixture)
+        .arg(supervisor)
+        .arg(spec)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(parent.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let host_pid: u32 = line.trim().parse().unwrap();
+    let ready = std::time::Instant::now() + Duration::from_secs(8);
+    while !socket.exists() {
+        if std::time::Instant::now() >= ready {
+            let _ = parent.kill();
+            let _ = parent.wait();
+            panic!("owned fixture controller never became ready");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    parent.kill().unwrap();
+    parent.wait().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    while socket.exists() {
+        assert!(std::time::Instant::now() < deadline, "socket survived killed parent");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).is_ok());
+    // Read-only process check; never terminate by process name.
+    assert!(
+        unsafe { libc::kill(host_pid as i32, 0) } != 0
+            || crate::helper::network::ProcessIdentity::capture(host_pid).is_err()
+    );
+}
+
+#[test]
+fn ffi_full_output_pool_preserves_accepted_result_for_retry() {
+    let _serial = lock(&FFI_TEST_LOCK);
+    let directory = TestDir::new();
+    let options = json!({"version":1,"dataDir":directory.0}).to_string();
+    unsafe {
+        let handle = ffi::cvn_create(options.as_ptr(), options.len() as u64);
+        assert!(!handle.is_null());
+        let mut buffers: Vec<_> = (0..64).map(|_| ffi::cvn_snapshot(handle)).collect();
+        assert!(buffers.iter().all(|buffer| buffer.status == 0));
+        let request = request("retained-result", "snapshot", json!({}));
+        let input = serde_json::to_vec(&request).unwrap();
+        assert_eq!(ffi::cvn_submit(handle, input.as_ptr(), input.len() as u64), 0);
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let event = ffi::cvn_next_event(handle);
+            if event.status == 2 {
+                break;
+            }
+            assert_eq!(event.status, 4);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(ffi::cvn_free_buffer(buffers.pop().unwrap()), 0);
+        loop {
+            let event = ffi::cvn_next_event(handle);
+            assert!([0, 4].contains(&event.status));
+            if event.status == 4 {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            let value: Value =
+                serde_json::from_slice(std::slice::from_raw_parts(event.data, event.length as usize)).unwrap();
+            ffi::cvn_free_buffer(event);
+            if value["kind"] != "result" {
+                continue;
+            }
+            assert_eq!(value["id"], "retained-result");
+            assert_eq!(value["ok"], true);
+            break;
+        }
+        for buffer in buffers {
+            ffi::cvn_free_buffer(buffer);
+        }
+        assert_eq!(ffi::cvn_next_event(handle).status, 4);
+        while ffi::cvn_destroy(handle) == 2 {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+#[test]
+fn event_bytes_are_bounded_and_metrics_coalesce_without_losing_results() {
+    let shared = Shared {
+        snapshot: Mutex::new(json!({"revision":1,"runtime":{"status":"running","coreGeneration":1}})),
+        events: Mutex::new(VecDeque::new()),
+        pending: Mutex::new(HashMap::new()),
+        stopping: AtomicBool::new(false),
+        shutdown: Notify::new(),
+    };
+    for up in 0..1000 {
+        shared.stream(1, "traffic", Ok(json!({"up":up})));
+    }
+    assert_eq!(lock(&shared.events).len(), 1);
+    assert_eq!(lock(&shared.events)[0].value["data"]["value"]["up"], 999);
+    for _ in 0..1000 {
+        shared.stream(1, "logs", Ok(json!({"payload":"x".repeat(32768)})));
+    }
+    assert!(lock(&shared.events).iter().map(|event| event.bytes).sum::<usize>() <= 4 * 1024 * 1024);
+    lock(&shared.pending).insert(
+        "accepted".into(),
+        Pending {
+            token: Arc::new(Cancellation::default()),
+            bytes: 10,
+            response_bytes: 1024,
+        },
+    );
+    shared.complete("accepted", Ok(json!({"value":"finished"})), None);
+    shared.complete("accepted", Err(anyhow::anyhow!("duplicate finish")), None);
+    assert_eq!(
+        lock(&shared.events)
+            .iter()
+            .filter(|event| event.value["kind"] == "result")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn queued_byte_backpressure_and_worker_failure_complete_only_accepted_requests() {
+    let dir = TestDir::new();
+    let shared = Arc::new(Shared {
+        snapshot: Mutex::new(json!({"revision":0,"runtime":{"status":"stopped","coreGeneration":0}})),
+        events: Mutex::new(VecDeque::new()),
+        pending: Mutex::new(HashMap::new()),
+        stopping: AtomicBool::new(false),
+        shutdown: Notify::new(),
+    });
+    let (sender, _receiver) = mpsc::channel(128);
+    let (_complete, completion) = std::sync::mpsc::channel();
+    drop(_complete);
+    let client = Client {
+        sender,
+        shared: Arc::clone(&shared),
+        runtime: None,
+        completion: Mutex::new(completion),
+        _directory_lock: File::create(dir.0.join("fixture-lock")).unwrap(),
+    };
+    assert_eq!(client.submit(request("accepted", "snapshot", json!({}))), 0);
+    lock(&shared.pending).get_mut("accepted").unwrap().bytes = MAX_PENDING_BYTES;
+    assert_eq!(client.submit(request("rejected", "snapshot", json!({}))), 2);
+    let token = lock(&shared.pending)["accepted"].token.clone();
+    shared.fail_pending();
+    assert!(token.check().is_err());
+    assert!(lock(&shared.pending).is_empty());
+    let result = client.next_event().unwrap();
+    assert_eq!(result["id"], "accepted");
+    assert_eq!(result["ok"], false);
+    assert!(client.next_event().is_none());
+    assert_eq!(client.submit(request("after-failure", "snapshot", json!({}))), 3);
 }

@@ -62,12 +62,6 @@ unsafe extern "C" {
 #[link(name = "SystemConfiguration", kind = "framework")]
 unsafe extern "C" {
     fn SCPreferencesCreate(allocator: Ref, name: Ref, prefs_id: Ref) -> Ref;
-    fn SCPreferencesCreateWithAuthorization(
-        allocator: Ref,
-        name: Ref,
-        prefs_id: Ref,
-        authorization: *mut c_void,
-    ) -> Ref;
     fn SCPreferencesLock(preferences: Ref, wait: u8) -> u8;
     fn SCPreferencesUnlock(preferences: Ref) -> u8;
     fn SCPreferencesCommitChanges(preferences: Ref) -> u8;
@@ -79,45 +73,6 @@ unsafe extern "C" {
     fn SCNetworkProtocolGetConfiguration(protocol: Ref) -> Ref;
     fn SCNetworkProtocolSetConfiguration(protocol: Ref, configuration: Ref) -> u8;
     fn SCError() -> i32;
-}
-#[repr(C)]
-struct AuthorizationItem {
-    name: *const c_char,
-    value_length: usize,
-    value: *mut c_void,
-    flags: u32,
-}
-#[repr(C)]
-struct AuthorizationItems {
-    count: u32,
-    items: *mut AuthorizationItem,
-}
-#[link(name = "Security", kind = "framework")]
-unsafe extern "C" {
-    fn AuthorizationCreate(
-        rights: *const AuthorizationItems,
-        environment: *const AuthorizationItems,
-        flags: u32,
-        output: *mut *mut c_void,
-    ) -> i32;
-    fn AuthorizationCopyRights(
-        authorization: *mut c_void,
-        rights: *const AuthorizationItems,
-        environment: *const AuthorizationItems,
-        flags: u32,
-        output: *mut *mut AuthorizationItems,
-    ) -> i32;
-    fn AuthorizationFree(authorization: *mut c_void, flags: u32) -> i32;
-}
-struct Authorization(*mut c_void);
-// Authorization Services references are process-local handles, serialized by the business runtime.
-unsafe impl Send for Authorization {}
-impl Drop for Authorization {
-    fn drop(&mut self) {
-        unsafe {
-            AuthorizationFree(self.0, 0);
-        }
-    }
 }
 struct Owned(Ref);
 impl Drop for Owned {
@@ -259,54 +214,20 @@ fn encode(value: &Value) -> Result<Owned> {
 /// Independent preferences session; no shell subprocesses, helper installation or implicit writes.
 pub struct MacNetwork {
     mode: NetworkMode,
-    authorization: Option<Authorization>,
 }
 impl MacNetwork {
     pub fn new(mode: NetworkMode) -> Self {
-        Self {
-            mode,
-            authorization: None,
-        }
+        Self { mode }
     }
-    /// Only call in response to an explicit native UI networking operation.
-    /// Cancelling the administrator prompt leaves the network unchanged.
     pub fn authorize_interactive(&mut self) -> Result<()> {
-        if self.mode == NetworkMode::IntegrationTest {
-            bail!("integrationTest forbids administrator authorization");
+        if self.mode == NetworkMode::IntegrationTest || unsafe { libc::geteuid() } != 0 {
+            bail!("system networking requires the independently approved root helper");
         }
-        let mut raw = ptr::null_mut();
-        let status = unsafe { AuthorizationCreate(ptr::null(), ptr::null(), 0, &mut raw) };
-        if status != 0 || raw.is_null() {
-            bail!("cannot create administrator authorization ({status})");
-        }
-        let authorization = Authorization(raw);
-        let right = CString::new("system.preferences.network")?;
-        let mut item = AuthorizationItem {
-            name: right.as_ptr(),
-            value_length: 0,
-            value: ptr::null_mut(),
-            flags: 0,
-        };
-        let rights = AuthorizationItems {
-            count: 1,
-            items: &mut item,
-        };
-        let status = unsafe { AuthorizationCopyRights(authorization.0, &rights, ptr::null(), 3, ptr::null_mut()) };
-        if status != 0 {
-            bail!("administrator authorization denied or cancelled ({status})");
-        }
-        self.authorization = Some(authorization);
         Ok(())
     }
     fn preferences(&self) -> Result<Owned> {
         let name = string("independent.native.mac.network")?;
-        owned(unsafe {
-            if let Some(authorization) = &self.authorization {
-                SCPreferencesCreateWithAuthorization(ptr::null(), name.0, ptr::null(), authorization.0)
-            } else {
-                SCPreferencesCreate(ptr::null(), name.0, ptr::null())
-            }
-        })
+        owned(unsafe { SCPreferencesCreate(ptr::null(), name.0, ptr::null()) })
     }
     pub fn services(&mut self) -> Result<Vec<String>> {
         let preferences = self.preferences()?;
@@ -329,10 +250,14 @@ impl MacNetwork {
         for i in 0..unsafe { CFArrayGetCount(services.0) } {
             let service = unsafe { CFArrayGetValueAtIndex(services.0, i) };
             if text(unsafe { SCNetworkServiceGetServiceID(service) })? == service_id {
-                return owned(unsafe { SCNetworkServiceCopyProtocol(service, protocol_name.0) });
+                let value = unsafe { SCNetworkServiceCopyProtocol(service, protocol_name.0) };
+                if value.is_null() {
+                    return Err(super::MissingNetworkService.into());
+                }
+                return owned(value);
             }
         }
-        bail!("network service no longer exists")
+        Err(super::MissingNetworkService.into())
     }
 }
 impl NetworkBackend for MacNetwork {
@@ -355,6 +280,7 @@ impl NetworkBackend for MacNetwork {
 }
 impl MacNetwork {
     fn locked_write(&mut self, expected: Option<&NetworkValue>, value: &NetworkValue) -> Result<bool> {
+        self.authorize_interactive()?;
         if self.mode == NetworkMode::IntegrationTest {
             bail!("integrationTest forbids SystemConfiguration writes");
         }

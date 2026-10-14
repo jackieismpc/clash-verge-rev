@@ -11,12 +11,29 @@ scripts/native-core-build.sh clippy --offline --all-targets -- -D warnings
 
 ## Ownership and ABI
 
-`include/clash_verge_native_core.h` defines schema-version-1 UTF-8 JSON, request ID,
-core generation and optional revision. Every accepted request receives a result.
-Rust owns a two-thread Tokio runtime, bounded queues, cancellations, configuration,
-background subscriptions, controller streams and its core. A directory lock rejects
-a second owner. Consumers free buffers once and never destroy a handle concurrently
-with calls; creation/destruction belong on a background executor.
+`include/clash_verge_native_core.h` is the single **ABI 2** contract, imported by
+Swift's NativeCoreC module. JSON schema remains version 1, with request IDs, core
+generation and revision. Inputs are explicit UTF-8 spans (no NUL scanning); outputs
+carry byte length, allocation ID and status. Handle tokens are never dereferenced.
+
+Concurrent calls acquire owned client leases. Stale handles and forged buffer frees
+are rejected; release/destroy are idempotent. `cvn_destroy` returns 2 while its cleanup
+thread is joining the runtime, then 0. A failed cleanup remains failed on repeated
+calls. Never unload the library before every handle reports 0 and every buffer is
+released. Swift retains the mapped code on cleanup failure/timeout. Request deadlines
+are 120 seconds (180 for all media checks), shutdown observation is 30 seconds;
+a timeout is not proof that a submitted mutation failed, so refresh before retrying.
+
+Rust owns a two-thread Tokio runtime, configuration, cancellation and owned tasks.
+The queue limits accepted commands by count and 64 MiB of input; output reservations
+and pending-result limits apply backpressure. Outbound C buffers are limited to 64
+allocations and 128 MiB total. A full allocation pool preserves the queued event for
+retry. Metrics coalesce, streams cap at 4 MiB, HTTP responses cap at 8 MiB and
+WebSocket messages/frames at 2 MiB. Oversized results become an explicit
+`resultUnavailable` response carrying `operationSucceeded`, not fabricated success.
+The authoritative snapshot remains available; state notifications may coalesce or
+be omitted during congestion. Worker failure cancels and completes accepted IDs.
+A private directory lock rejects a second runtime owner.
 
 Writes serialize. Delay/media checks share eight slots and run outside the write
 queue; each result publishes without artificial waits. Generation/revision checks
@@ -53,11 +70,24 @@ backoff; rotating logs and owned stream tasks remain bounded and are joined on q
 
 ## Platform and isolation
 
-Mac proxy/DNS uses authorized SystemConfiguration and a durable field ownership
-journal. TUN uses a standalone root-owned SMAppService helper that authenticates
+All Mac proxy/DNS/TUN writes use a standalone root-owned SMAppService helper and
+durable field ownership journals. The GUI no longer writes SystemConfiguration
+using a transient authorization prompt. The helper authenticates
 the GUI audit token/code hash, owns only its child/cache/socket and exposes a
 controller firewall instead of arbitrary privileged config paths. Its engine is
-fixed inside the signed installed bundle. Actual OS validation is skipped by user
+fixed inside the signed installed bundle. Proxy/DNS leases monitor both the GUI audit
+token and the owned core's PID/UID/start time. Restore compares only owned fields,
+retains partial ApplyChanges failures for retry and never recreates deleted services.
+Service restart recovers journals and exact orphaned engine identities first. Legacy
+GUI journals from the signed bundle's default data directory migrate to root storage
+before restoration; unfinished legacy recovery is surfaced by the GUI. Ordinary
+engines run through the bundled unprivileged supervisor (`hostPath`) and its lifetime
+pipe; GUI death closes that pipe. Privileged engines are recorded before TUN routes
+are enabled and use redir-host instead of persistent fake IPs.
+
+Installation/uninstallation scripts use fixed identities, refuse live/redirected
+installations and delete owned files only after service unregistration and recovery.
+Actual OS validation is skipped by user
 request; automated checks do not install/register/authorize this service.
 
 Initialization accepts `executionMode: integrationTest` with absolute

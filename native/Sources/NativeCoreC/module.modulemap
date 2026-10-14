@@ -1,0 +1,4 @@
+module NativeCoreC {
+  header "../../../crates/clash-verge-native-core/include/clash_verge_native_core.h"
+  export *
+}

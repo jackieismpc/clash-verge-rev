@@ -14,8 +14,8 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_tungstenite::{
-    client_async,
-    tungstenite::{Message, client::IntoClientRequest, http::HeaderValue},
+    client_async_with_config,
+    tungstenite::{Message, client::IntoClientRequest, http::HeaderValue, protocol::WebSocketConfig},
 };
 
 pub struct Controller {
@@ -23,6 +23,7 @@ pub struct Controller {
     secret: String,
     client: reqwest::Client,
     pub child: Option<Child>,
+    pub(crate) supervisor: Option<PathBuf>,
     pub streams: Vec<JoinHandle<()>>,
     retired_streams: Vec<JoinHandle<()>>,
     log_tasks: Vec<JoinHandle<()>>,
@@ -43,6 +44,7 @@ impl Controller {
             secret,
             client,
             child: None,
+            supervisor: None,
             streams: vec![],
             retired_streams: vec![],
             log_tasks: vec![],
@@ -58,6 +60,7 @@ impl Controller {
             secret: self.secret.clone(),
             client: self.client.clone(),
             child: None,
+            supervisor: None,
             streams: vec![],
             retired_streams: vec![],
             log_tasks: vec![],
@@ -84,11 +87,25 @@ impl Controller {
         if let Some(body) = body {
             request = request.json(body);
         }
-        let response = request.send().await?;
+        let mut response = request.send().await?;
         let status = response.status();
-        let text = response.text().await?;
+        if response.content_length().is_some_and(|size| size > 8 * 1024 * 1024) {
+            bail!("controller response exceeds 8 MiB");
+        }
+        let mut bytes = vec![];
+        while let Some(chunk) = response.chunk().await? {
+            if bytes.len() + chunk.len() > 8 * 1024 * 1024 {
+                bail!("controller response exceeds 8 MiB");
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let text = String::from_utf8(bytes).context("controller response is not UTF-8")?;
         if !status.is_success() {
-            bail!("Mihomo HTTP {}: {}", status.as_u16(), text);
+            bail!(
+                "Mihomo HTTP {}: {}",
+                status.as_u16(),
+                text.chars().take(4096).collect::<String>()
+            );
         }
         if text.is_empty() {
             return Ok(Value::Null);
@@ -132,15 +149,27 @@ impl Controller {
             2 * 1024 * 1024,
             3,
         )?)));
-        let mut child = owned_command(binary, home, self.integration_test)
-            .arg("-d")
-            .arg(home)
-            .arg("-f")
-            .arg(config)
-            .stdin(Stdio::null())
+        let mut command = if let Some(supervisor) = &self.supervisor {
+            let mut command = owned_command(supervisor, home, self.integration_test);
+            command
+                .arg("--supervise")
+                .arg(serde_json::to_string(&crate::supervisor::Specification {
+                    binary: binary.into(),
+                    home: home.into(),
+                    config: config.into(),
+                    integration: self.integration_test,
+                })?)
+                .stdin(Stdio::piped());
+            command
+        } else {
+            let mut command = owned_command(binary, home, self.integration_test);
+            command.arg("-d").arg(home).arg("-f").arg(config).stdin(Stdio::null());
+            command
+        };
+        let mut child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
+            .kill_on_drop(self.supervisor.is_none())
             .spawn()?;
         if let Some(stdout) = child.stdout.take() {
             self.log_tasks.push(capture_log(stdout, Arc::clone(&writer)));
@@ -191,7 +220,15 @@ impl Controller {
         }
         if let Some(child) = self.child.as_mut() {
             if child.try_wait()?.is_none() {
-                child.kill().await?;
+                if self.supervisor.is_some() {
+                    // Closing the lifetime pipe lets the host stop and wait for its child.
+                    child.stdin.take();
+                    tokio::time::timeout(Duration::from_secs(8), child.wait())
+                        .await
+                        .context("owned supervisor cleanup timed out")??;
+                } else {
+                    child.kill().await?;
+                }
             }
             child.wait().await?;
             // Retain process ownership until termination is confirmed.
@@ -250,9 +287,23 @@ impl Controller {
                         request
                             .headers_mut()
                             .insert("authorization", HeaderValue::from_str(&format!("Bearer {secret}"))?);
-                        let (mut ws, _) = tokio::time::timeout(Duration::from_secs(5), client_async(request, stream))
-                            .await
-                            .context("Stream handshake timed out")??;
+                        let (mut ws, _) = tokio::time::timeout(
+                            Duration::from_secs(5),
+                            client_async_with_config(
+                                request,
+                                stream,
+                                Some(
+                                    WebSocketConfig::default()
+                                        .max_message_size(Some(2 * 1024 * 1024))
+                                        .max_frame_size(Some(2 * 1024 * 1024))
+                                        .read_buffer_size(8192)
+                                        .write_buffer_size(8192)
+                                        .max_write_buffer_size(65536),
+                                ),
+                            ),
+                        )
+                        .await
+                        .context("Stream handshake timed out")??;
                         publish(generation, "streamStatus", Ok(json!({"stream":name,"connected":true})));
                         loop {
                             let message = tokio::time::timeout(Duration::from_secs(45), ws.next())
@@ -370,6 +421,95 @@ pub fn stopped(owner: &str, generation: u64, socket: &Path, port: u16) -> Value 
 #[cfg(test)]
 mod reconnect_tests {
     use super::*;
+    #[tokio::test]
+    async fn oversized_http_and_websocket_do_not_poison_next_connection() -> Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.work/controller-limits");
+        tokio::fs::create_dir_all(&root).await?;
+        let socket = root.canonicalize()?.join(format!("{}.sock", crate::unique_id()));
+        let listener = tokio::net::UnixListener::bind(&socket)?;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let mut buffer = [0; 4096];
+            let mut header = vec![];
+            while !header.windows(4).any(|part| part == b"\r\n\r\n") {
+                let count = stream.read(&mut buffer).await?;
+                if count == 0 {
+                    bail!("fixture client disconnected before headers");
+                }
+                header.extend_from_slice(&buffer[..count]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n")
+                .await?;
+            for _ in 0..9 {
+                if stream.write_all(b"100000\r\n").await.is_err() {
+                    break;
+                }
+                if stream.write_all(&vec![b'x'; 1024 * 1024]).await.is_err() {
+                    break;
+                }
+                if stream.write_all(b"\r\n").await.is_err() {
+                    break;
+                }
+            }
+            drop(stream);
+            let (mut stream, _) = listener.accept().await?;
+            let mut header = vec![];
+            while !header.windows(4).any(|part| part == b"\r\n\r\n") {
+                let count = stream.read(&mut buffer).await?;
+                if count == 0 {
+                    bail!("fixture client disconnected before headers");
+                }
+                header.extend_from_slice(&buffer[..count]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .await?;
+            drop(stream);
+            let (stream, _) = listener.accept().await?;
+            let mut ws = tokio_tungstenite::accept_async(stream).await?;
+            let _ = ws.send(Message::Text("x".repeat(2 * 1024 * 1024 + 1).into())).await;
+            drop(ws);
+            let (stream, _) = listener.accept().await?;
+            let mut ws = tokio_tungstenite::accept_async(stream).await?;
+            ws.send(Message::Text("{\"up\":42}".into())).await?;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok::<(), anyhow::Error>(())
+        });
+        let mut controller = Controller::new(socket.clone(), "fixture".into())?;
+        assert!(
+            controller
+                .request("GET", "/version", None)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("8 MiB")
+        );
+        assert_eq!(controller.request("GET", "/version", None).await?, json!({}));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        controller.subscribe(&["traffic".into()], 1, move |_, name, value| {
+            if name == "traffic" {
+                let _ = tx.send(value);
+            }
+        })?;
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), rx.recv())
+                .await?
+                .context("missing oversized error")?
+                .is_err()
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), rx.recv())
+                .await?
+                .context("missing reconnected data")??["up"],
+            42
+        );
+        controller.stop().await?;
+        tokio::time::timeout(Duration::from_secs(3), server).await???;
+        tokio::fs::remove_file(socket).await?;
+        Ok(())
+    }
     #[tokio::test]
     async fn unix_stream_reconnects_after_close_and_stop_reaps_tasks() -> Result<()> {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.work/stream-tests");

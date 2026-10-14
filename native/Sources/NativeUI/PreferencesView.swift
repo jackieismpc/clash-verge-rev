@@ -79,24 +79,26 @@ private struct NetworkPreferences: View {
                 Toggle("TUN 增强模式", isOn: Binding(get: { model.snapshot?.networkFeatures.tun == .on || model.snapshot?.networkFeatures.tun == .failed }, set: { enabled in
                     Task { await model.command("setTun", payload: ["enabled": String(enabled)]) }
                 }))
-                TextField("系统 DNS（IP 地址，用逗号分隔）", text: $dns)
+                TextField("系统 DNS（公共或 LAN 地址，用逗号分隔）", text: $dns)
                 HStack {
                     Button("应用 DNS") { Task { await model.command("setSystemDNS", payload: ["servers": dns]) } }.disabled(dns.isEmpty)
                     Button("恢复所属系统代理与 DNS") { Task { await model.command("restoreNetwork") } }
                 }
-                Text("系统代理可能请求管理员授权。退出会恢复仍属于本应用的设置，保留其他应用之后的修改。")
+                Text("系统代理、DNS 与 TUN 由独立权限服务监护；应用消失时恢复所属设置，保留其他应用后续修改。")
                     .font(.caption).foregroundStyle(.secondary)
             }.disabled(model.isDemo || model.isIntegrationTest || model.busy)
-            Section("TUN 权限服务") {
+            Section("网络权限服务") {
+                Text("TUN 使用真实 IP 的 DNS 模式，避免关闭后系统缓存保留本应用的 Fake IP。关闭代理模式或退出会恢复所属系统 DNS。")
+                    .font(.caption).foregroundStyle(.secondary)
                 Text(helperStatus == .enabled ? "独立服务已获授权" : helperStatus == .requiresApproval ? "等待系统设置中的管理员批准" : "尚未注册独立服务")
-                Text("TUN 需要将应用安装到 /Applications/Clash Native.app，并授予独立服务权限。不会使用现有 Clash Verge 的服务。")
+                Text("接管系统网络需要将应用安装到 /Applications/Clash Native.app，并授予独立服务权限。不会使用现有 Clash Verge 的服务。")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Button("注册权限服务") {
                         do { try service.register(); helperStatus = service.status } catch { model.report(error) }
                     }.disabled(Bundle.main.bundleURL.path != "/Applications/Clash Native.app" || helperStatus == .enabled)
                     Button("打开系统授权设置") { SMAppService.openSystemSettingsLoginItems() }
-                    Button("注销服务") { Task { do { await model.command("setTun", payload: ["enabled": "false"]); if model.failure == nil { try await service.unregister(); helperStatus = service.status } } catch { model.report(error) } } }
+                    Button("注销服务") { Task { do { await model.command("setTun", payload: ["enabled": "false"]); if model.failure == nil { await model.command("restoreNetwork"); if model.failure != nil { return }; try await service.unregister(); helperStatus = service.status } } catch { model.report(error) } } }
                         .disabled(helperStatus == .notRegistered)
                 }
             }.disabled(model.isDemo || model.isIntegrationTest || model.busy)

@@ -463,6 +463,13 @@ fn execute(args: Arguments) -> Result<bool> {
         version: 1,
         data_dir: directory.clone(),
         mihomo_path: Some(args.mihomo),
+        host_path: Some({
+            let host = std::env::current_exe()?.with_file_name("clash-native-helper");
+            if !host.is_file() {
+                bail!("build the native supervisor with scripts/native-integration.sh");
+            }
+            host
+        }),
         mixed_port: Some(port),
         execution_mode: ExecutionMode::IntegrationTest,
         integration_root: Some(root),

@@ -124,6 +124,9 @@ fn signing_info(code: Ref) -> Result<Owned> {
     let status = unsafe { SecCodeCopySigningInformation(code, 2, &mut raw) };
     checked(status, raw)
 }
+pub(super) fn gui_alive(token: &[u32; 8]) -> bool {
+    guest_for_token(token).is_ok()
+}
 fn guest_for_token(token: &[u32; 8]) -> Result<Owned> {
     let data = Owned(unsafe {
         CFDataCreate(
@@ -274,6 +277,7 @@ impl Session {
             generation: Some(self.generation),
             pid: Some(self.child.id()),
             private_socket: Some(self.socket.to_string_lossy().into()),
+            network: None,
             message: "Independently approved native TUN core is running".into(),
         }
     }
@@ -311,6 +315,7 @@ fn empty_status() -> HelperStatus {
         generation: None,
         pid: None,
         private_socket: None,
+        network: None,
         message: "Native helper is approved and ready".into(),
     }
 }
@@ -364,17 +369,28 @@ fn private_write(path: &Path, content: &[u8]) -> Result<()> {
     if path.exists() {
         secure_existing(path, false)?;
     }
+    let temporary = path.with_extension("pending");
+    if temporary.exists() {
+        secure_existing(&temporary, false)?;
+        fs::remove_file(&temporary)?;
+    }
     let mut file = OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
-    file.set_permissions(fs::Permissions::from_mode(0o600))?;
-    file.write_all(content)?;
-    file.sync_all()?;
-    Ok(())
+        .open(&temporary)?;
+    let outcome = (|| {
+        file.write_all(content)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)?;
+        fs::File::open(path.parent().ok_or_else(|| anyhow::anyhow!("missing private parent"))?)?.sync_all()?;
+        Ok(())
+    })();
+    if outcome.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    outcome
 }
 fn chown(path: &Path, uid: u32, gid: u32) -> Result<()> {
     let path = CString::new(path.as_os_str().as_encoded_bytes())?;
@@ -589,6 +605,116 @@ fn prune_inactive_staging(directory: &Path, active_config: &Path) -> Result<()> 
     }
     Ok(())
 }
+fn recover_legacy(identity: &Identity) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let info = identity
+        .main
+        .parent()
+        .and_then(Path::parent)
+        .context("installed Contents missing")?
+        .join("Info.plist");
+    let output = Command::new("/usr/bin/plutil")
+        .args(["-extract", "CvnDevelopmentDataDir", "raw", "-o", "-"])
+        .arg(info)
+        .output()?;
+    if !output.status.success() {
+        bail!("installed data directory is missing");
+    }
+    let directory = PathBuf::from(String::from_utf8(output.stdout)?.trim());
+    if !directory.is_absolute() || !directory.ends_with(".work/native-ui/data") {
+        bail!("unexpected installed legacy data directory");
+    }
+    let journal = directory.join("network-ownership.json");
+    if !journal.try_exists()? {
+        return Ok(());
+    }
+    for ancestor in directory.ancestors().take_while(|path| *path != Path::new("/")) {
+        if fs::symlink_metadata(ancestor)?.file_type().is_symlink() {
+            bail!("redirected legacy recovery directory");
+        }
+    }
+    let data_metadata = fs::symlink_metadata(&directory)?;
+    let metadata = fs::symlink_metadata(&journal)?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != data_metadata.uid()
+        || metadata.uid() == 0
+        || metadata.mode() & 0o077 != 0
+        || metadata.len() > 65536
+    {
+        bail!("unsafe legacy recovery journal");
+    }
+    let mut bytes = vec![];
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&journal)?
+        .take(65537)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > 65536 {
+        bail!("legacy recovery journal exceeds limit");
+    }
+    let snapshot: crate::platform::OwnershipSnapshot = serde_json::from_slice(&bytes)?;
+    let digest = Sha256::digest(directory.canonicalize()?.as_os_str().as_encoded_bytes());
+    let owner = format!(
+        "native-mac:{}",
+        digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+    );
+    if snapshot.owner != owner {
+        bail!("legacy recovery owner mismatch");
+    }
+    let mut check = crate::platform::NetworkTransaction::new(
+        crate::platform::MacNetwork::new(crate::platform::NetworkMode::Interactive),
+        crate::platform::NetworkMode::Interactive,
+        owner.clone(),
+    )?;
+    check.adopt_snapshot(snapshot.clone())?;
+    if !snapshot.changes.is_empty() {
+        let root_directory = super::network::directory(metadata.uid());
+        create_directory(&root_directory, 0o710)?;
+        chown(&root_directory, 0, data_metadata.gid())?;
+        let root_journal = root_directory.join("network-ownership.json");
+        if root_journal.exists() {
+            let previous: crate::platform::OwnershipSnapshot =
+                serde_json::from_value(super::network::safe_json(&root_journal, 65536)?)?;
+            if !previous.changes.is_empty() {
+                bail!("finish root recovery before adopting legacy journal");
+            }
+        }
+        // Move the recovery evidence to root-owned storage before restoring any field.
+        private_write(&root_journal, &serde_json::to_vec(&snapshot)?)?;
+        super::network::recover_directory(&root_directory)?;
+    }
+    fs::remove_file(journal)?;
+    Ok(())
+}
+
+pub fn recover_for_uninstall() -> Result<()> {
+    if unsafe { libc::geteuid() } != 0 {
+        bail!("network recovery requires root");
+    }
+    let identity = Identity::installed()?;
+    let root = Path::new(HELPER_DATA);
+    if !root.exists() {
+        create_directory(root, 0o711)?;
+    }
+    secure_existing(root, true)?;
+    let lock_path = root.join("daemon.lock");
+    let lock = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&lock_path)?;
+    secure_existing(&lock_path, false)?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        bail!("helper is still running; unregister it before removing files");
+    }
+    super::network::recover_all()?;
+    recover_legacy(&identity)
+}
+
 /// Call only from the signed SMAppService launch daemon executable. Not used by integration tests.
 pub fn serve() -> Result<()> {
     if unsafe { libc::geteuid() } != 0 {
@@ -629,21 +755,53 @@ pub fn serve() -> Result<()> {
         libc::signal(libc::SIGTERM, terminate as *const () as libc::sighandler_t);
         libc::signal(libc::SIGINT, terminate as *const () as libc::sighandler_t);
     }
+    super::network::recover_all()?;
+    recover_legacy(&identity)?;
+    let mut network: Option<super::network::NetworkLease> = None;
     let mut session: Option<Session> = None;
+    let mut next_inspection = Instant::now();
     while !STOPPING.load(Ordering::Relaxed) {
-        if let Some(active) = &mut session {
-            if active.child.try_wait()?.is_some() {
-                active.finish_logs();
-                let _ = fs::remove_file(&active.socket);
-                session = None;
-            } else if guest_for_token(&active.gui_token).is_err() && active.stop().is_ok() {
-                session = None;
+        if Instant::now() >= next_inspection {
+            next_inspection = Instant::now() + Duration::from_millis(250);
+            if let Some(lease) = &mut network
+                && super::network::monitor(
+                    lease,
+                    gui_alive(&lease.record.gui_token),
+                    lease.record.core.alive(),
+                    super::network::ProcessIdentity::terminate,
+                )
+                .is_ok_and(|released| released)
+            {
+                network = None;
+            }
+            if let Some(active) = &mut session {
+                if active.child.try_wait()?.is_some() {
+                    active.finish_logs();
+                    let _ = fs::remove_file(&active.socket);
+                    session = None;
+                } else if guest_for_token(&active.gui_token).is_err() && active.stop().is_ok() {
+                    session = None;
+                }
             }
         }
         let (mut stream, _) = match listener.accept() {
             Ok(value) => value,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(50));
+                let mut pending = libc::pollfd {
+                    fd: listener.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                let wait_ms = if network.is_some() || session.is_some() {
+                    250
+                } else {
+                    1000
+                };
+                if unsafe { libc::poll(&mut pending, 1, wait_ms) } < 0
+                    && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
+                {
+                    return Err(std::io::Error::last_os_error().into());
+                }
                 continue;
             }
             Err(error) => return Err(error.into()),
@@ -663,14 +821,77 @@ pub fn serve() -> Result<()> {
             stream.read_exact(&mut body)?;
             let command: HelperCommand = serde_json::from_slice(&body)?;
             match command {
+                HelperCommand::NetworkSet {
+                    owner,
+                    mixed_port,
+                    core_pid,
+                    proxy,
+                    dns_servers,
+                } => {
+                    if !super::network::valid_owner(&owner) {
+                        bail!("invalid independent network owner");
+                    }
+                    if let Some(lease) = &network
+                        && (lease.uid != uid || lease.owner != owner || lease.record.gui_token != token)
+                    {
+                        bail!("network is owned by another native instance");
+                    }
+                    let (core, parent) = super::network::ProcessIdentity::capture(core_pid)?;
+                    let owned_tun = session.as_ref().is_some_and(|active| {
+                        active.uid == uid && active.owner == owner && active.child.id() == core_pid
+                    });
+                    if !owned_tun && (core.uid != uid || parent != token[5]) {
+                        bail!("network target is not an owned child engine");
+                    }
+                    let directory = super::network::directory(uid);
+                    create_directory(&directory, 0o710)?;
+                    chown(&directory, 0, gid)?;
+                    if network.is_none() {
+                        network = Some(super::network::NetworkLease {
+                            uid,
+                            owner: owner.clone(),
+                            record: super::network::LeaseRecord {
+                                gui_token: token,
+                                core: core.clone(),
+                            },
+                            session: crate::network::NetworkSession::open_owned(
+                                &directory,
+                                crate::platform::NetworkMode::Interactive,
+                                owner,
+                            )?,
+                        });
+                    }
+                    let lease = network
+                        .as_mut()
+                        .ok_or_else(|| anyhow::anyhow!("network lease missing"))?;
+                    lease.record = super::network::LeaseRecord { gui_token: token, core };
+                    private_write(
+                        &directory.join("network-process.json"),
+                        &serde_json::to_vec(&lease.record)?,
+                    )?;
+                    lease.session.configure(proxy, dns_servers, mixed_port)?;
+                    Ok(super::network::attach_status(empty_status(), network.as_ref()))
+                }
+                HelperCommand::NetworkRestore { owner } => {
+                    if let Some(lease) = &mut network {
+                        if lease.uid != uid || lease.owner != owner || lease.record.gui_token != token {
+                            bail!("network restoration is not owned by this instance");
+                        }
+                        lease.restore()?;
+                    }
+                    Ok(super::network::attach_status(empty_status(), network.as_ref()))
+                }
                 HelperCommand::Status => {
+                    if network.as_ref().is_some_and(|lease| lease.uid != uid) {
+                        bail!("network is owned by another logged-in user");
+                    }
                     if let Some(active) = &session {
                         if active.uid != uid {
                             bail!("native helper is owned by another logged-in user");
                         }
-                        return Ok(active.status());
+                        return Ok(super::network::attach_status(active.status(), network.as_ref()));
                     }
-                    Ok(empty_status())
+                    Ok(super::network::attach_status(empty_status(), network.as_ref()))
                 }
                 HelperCommand::Reload {
                     owner,
@@ -747,13 +968,16 @@ pub fn serve() -> Result<()> {
                     result
                 }
                 HelperCommand::Stop { owner, generation } => {
+                    if session.is_none() {
+                        return Ok(super::network::attach_status(empty_status(), network.as_ref()));
+                    }
                     let active = session
                         .as_mut()
                         .ok_or_else(|| anyhow::anyhow!("no owned TUN session"))?;
                     verify_owned_stop(&active.status(), uid, &owner, generation)?;
                     active.stop()?;
                     session = None;
-                    Ok(empty_status())
+                    Ok(super::network::attach_status(empty_status(), network.as_ref()))
                 }
                 HelperCommand::Start {
                     owner,
@@ -802,11 +1026,17 @@ pub fn serve() -> Result<()> {
                     }
                     validate_configuration(&identity.core, &directory, &directory.join("config.yaml"))?;
                     let log = helper_log(&directory)?;
+                    let mut initial: Value = serde_yaml_ng::from_str(&prepared.yaml)?;
+                    initial["tun"]["enable"] = false.into();
+                    private_write(
+                        &directory.join("initial.yaml"),
+                        serde_yaml_ng::to_string(&initial)?.as_bytes(),
+                    )?;
                     let mut child = Command::new(&identity.core)
                         .args(["-d"])
                         .arg(&directory)
                         .arg("-f")
-                        .arg(directory.join("config.yaml"))
+                        .arg(directory.join("initial.yaml"))
                         .env_clear()
                         .env("HOME", &directory)
                         .env("PATH", "/usr/bin:/bin")
@@ -837,6 +1067,14 @@ pub fn serve() -> Result<()> {
                         log_tasks,
                     });
                     started_this_request = true;
+                    let active = session
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("TUN ownership missing"))?;
+                    let (core, _) = super::network::ProcessIdentity::capture(active.child.id())?;
+                    private_write(
+                        &directory.join("engine-owner.json"),
+                        &serde_json::to_vec(&super::network::LeaseRecord { gui_token: token, core })?,
+                    )?;
                     let deadline = Instant::now() + Duration::from_secs(5);
                     while Instant::now() < deadline {
                         let active = session.as_mut().ok_or_else(|| anyhow::anyhow!("TUN session lost"))?;
@@ -852,13 +1090,17 @@ pub fn serve() -> Result<()> {
                                 bail!("privileged engine socket is not root-owned");
                             }
                             fs::set_permissions(&engine_socket, fs::Permissions::from_mode(0o600))?;
+                            if !gui_alive(&token) {
+                                bail!("native owner exited before enabling TUN");
+                            }
+                            reload_engine(&engine_socket, &active.active_config, &active.secret)?;
                             active.bridge = Some(bridge::ControllerBridge::bind(
                                 &active.socket,
                                 engine_socket.clone(),
                                 uid,
                                 gid,
                             )?);
-                            return Ok(active.status());
+                            return Ok(super::network::attach_status(active.status(), network.as_ref()));
                         }
                         std::thread::sleep(Duration::from_millis(50));
                     }
@@ -889,6 +1131,11 @@ pub fn serve() -> Result<()> {
             .and_then(|_| stream.write_all(&body));
         if delivered.is_err() {
             let _ = cleanup_created_session(&mut session, started_this_request, Session::stop);
+        }
+    }
+    if let Some(lease) = &mut network {
+        while lease.restore().is_err() {
+            std::thread::sleep(Duration::from_millis(250));
         }
     }
     if let Some(active) = &mut session {

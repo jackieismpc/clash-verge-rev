@@ -3,10 +3,16 @@ set -euo pipefail
 project_root="${0:A:h:h}"
 bundle="$project_root/.work/native-ui/Clash Native.app"
 destination='/Applications/Clash Native.app'
+source "$project_root/scripts/installation-common.sh"
+native_refuse_live_application
+native_preflight_paths "$bundle" "$destination" "$project_root/.work/install"
 [[ $EUID == 0 ]] || { print -u2 'Run with sudo after building; this installs only Clash Native, and does not register its helper or change network settings.'; exit 1; }
 [[ -d "$bundle" && ! -L "$bundle" ]] || { print -u2 'Build scripts/native-ui-build.sh first.'; exit 1; }
 /usr/bin/codesign --verify --deep --strict "$bundle"
 if [[ -e "$destination" || -L "$destination" ]]; then
+  if /bin/launchctl print system/io.github.jackieismpc.clash-native.helper >/dev/null 2>&1; then
+    print -u2 'Unregister the native helper in Settings → Network before replacing the signed installation.'; exit 1
+  fi
   [[ -d "$destination" && ! -L "$destination" && "$(/usr/bin/stat -f %u "$destination")" == 0 ]] || { print -u2 'Existing installation is not a root-owned directory; move it aside manually first.'; exit 1; }
 fi
 install_root="$project_root/.work/install"
@@ -29,4 +35,4 @@ else
   /bin/mv "$stage/Clash Native.app" "$destination"
 fi
 /usr/bin/codesign --verify --deep --strict "$destination"
-print -r -- "Installed $destination. Open it as your normal user; enable the privileged helper in Settings → Network only when you want to test TUN."
+print -r -- "Installed $destination. Open it as your normal user; enable the privileged helper in Settings → Network before enabling system proxy, DNS or TUN."

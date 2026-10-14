@@ -25,6 +25,7 @@ pub struct Options {
     pub version: u32,
     pub data_dir: PathBuf,
     pub mihomo_path: Option<PathBuf>,
+    pub host_path: Option<PathBuf>,
     pub mixed_port: Option<u16>,
     #[serde(default)]
     pub execution_mode: ExecutionMode,
@@ -41,6 +42,9 @@ impl Options {
         }
         if self.mihomo_path.as_ref().is_some_and(|p| !p.is_absolute()) {
             bail!("mihomoPath must be absolute");
+        }
+        if self.host_path.as_ref().is_some_and(|path| !path.is_absolute()) {
+            bail!("hostPath must be absolute");
         }
         if self.mixed_port == Some(0) {
             bail!("mixedPort must be nonzero");

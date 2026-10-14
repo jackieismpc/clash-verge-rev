@@ -32,16 +32,19 @@ scripts/check-local.sh
 YAML、节点链接或订阅地址，选择配置，启动内核并选择节点。可显式使用
 `127.0.0.1:17890`，点击系统代理或 TUN 开关才会改变系统网络。
 
+本地追加规则插入最终 MATCH 前；显式追加 MATCH 可替换原 fallback。非法规则
+不替换当前配置，覆盖会保留到订阅更新、重启和备份恢复后。
+
 支持订阅后台更新、节点选择与测速取消、规则源更新和持久本地规则覆盖、
 连接详情与关闭、日志过滤与暂停、解锁检测、原生备份及旧目录/ZIP 导入。
 自定义 JS 只保留原件并提示迁移，不执行。关闭窗口保留后台任务，退出等待
 所属任务与内核清理、网络恢复。UI 尚待用户后续验证真实网络权限流程。
 
-## 系统代理与 TUN
+## 系统网络与安装卸载
 
-系统代理/DNS 使用 macOS 授权提示和所属字段恢复日志。TUN 使用本项目
-独立 SMAppService helper，不复用日常 Clash Verge 服务。安装路径固定为
-`/Applications/Clash Native.app`；请退出旧的 Clash Native 后自行安装：
+系统代理、系统 DNS 和 TUN 都由本项目的独立 SMAppService helper 管理，
+不复用日常 Clash Verge 服务。安装路径固定为 `/Applications/Clash Native.app`。
+先退出 Clash Native；更新已有安装前，在旧应用的设置 → 网络注销服务。
 
 ```sh
 scripts/native-ui-build.sh
@@ -49,12 +52,38 @@ sudo scripts/install-local.sh
 open '/Applications/Clash Native.app'
 ```
 
-在设置 → 网络注册特权服务，按系统提示到登录项与扩展批准，再开启 TUN。
-安装脚本只复制应用，不注册服务或改变网络。原生数据仍在项目 `.work`；
-helper 的 root 数据位于 `/var/db/io.github.jackieismpc.clash-native.helper`，
-服务 socket 位于 `/var/run/`，与日常实例分离。更新安装后要重开应用与服务，
-避免旧进程和新签名不一致。本轮没有 macOS VM，按用户确认暂跳过系统
-代理/DNS/TUN 的真实系统测试，后续由用户自行检查。
+在设置 → 网络注册权限服务，并到系统的登录项与扩展批准。安装本身只复制
+签名应用，不接管网络。权限服务未批准时，仍可使用独立 loopback 显式代理，
+系统代理/DNS/TUN 开关会报告权限失败，不绕过监护机制。
+
+网络接管前，helper 持久保存原始值和进程身份。正常退出先恢复仍属本应用
+的代理/DNS，再等待所属核心退出。GUI 崩溃或被强制结束时，独立 helper
+监护租约并恢复；服务重启先恢复旧 journal 和回收所属特权引擎。其他程序
+后来修改的字段予以保留。恢复失败保留 journal 并重试，不删除恢复证据。
+普通内核另有生命周期管道监护，GUI 消失后停止并等待 Go 子进程。
+
+关闭系统代理或 TUN 会恢复所属系统 DNS；TUN 使用 `redir-host`，避免退出
+后系统 DNS 缓存仍保留本应用生成的 Fake IP。手动系统 DNS 只接受公共/LAN
+的单播 IP，不允许指向未提供 DNS 监听的 localhost。不会停止系统 DNS 服务
+或清空全局 DNS 缓存。关闭主窗口仍在后台运行；⌘Q/菜单栏退出才结束接管。
+
+卸载请使用下列命令，不要直接把应用拖到废纸篓：
+
+```sh
+# 先退出 Clash Native；以普通用户从构建此安装的仓库执行
+scripts/uninstall-local.sh
+```
+
+卸载依次注销 helper 和登录启动、恢复网络及确认所属引擎退出，再删除安装包、
+`/var/db/io.github.jackieismpc.clash-native.helper`、服务 socket、项目原生运行
+目录/私有集成数据、安装备份、本应用的缓存/偏好/保存窗口状态及默认
+Application Support 数据。任一步恢复失败都停止文件删除，可排除错误后重试。
+源仓库、开发编译缓存、全局 Rust/Swift 和日常 Clash Verge 数据均保留。
+脚本拒绝重定向的数据目录和仍在运行的本应用；自定义 `CVN_DATA_DIRECTORY`
+仅供开发，指定的额外目录需开发者自行清理，正式使用请保留默认目录。
+
+本轮没有 macOS VM，按用户确认暂跳过安装、注销及系统代理/DNS/TUN 的真实
+系统测试。上述实现已有模拟事务与进程测试；它们不能证明真实 OS 恢复已验收。
 
 ## mihomo 更新
 

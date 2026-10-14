@@ -11,10 +11,12 @@ mod isolation;
 mod logs;
 mod migration;
 mod network;
+mod network_client;
 pub mod platform;
 mod rules;
 mod runtime_helper;
 mod subscriptions;
+mod supervisor;
 mod update;
 mod uri;
 
@@ -24,7 +26,7 @@ use config::{
 };
 use controller::{Controller, percent_encode, public_request_allowed, stopped};
 use futures_util::{FutureExt, StreamExt};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
@@ -44,6 +46,7 @@ use tokio::{
 
 const MAX_PENDING: usize = 128;
 const MAX_EVENTS: usize = 384;
+const MAX_PENDING_BYTES: usize = 64 * 1024 * 1024;
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
 fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -61,7 +64,7 @@ fn unique_id() -> String {
     )
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Request {
     pub version: u32,
@@ -71,6 +74,24 @@ pub struct Request {
     pub args: Value,
     pub core_generation: Option<u64>,
     pub revision: Option<u64>,
+}
+fn json_size(value: &impl Serialize) -> usize {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, value: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(value.len());
+            Ok(value.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    if serde_json::to_writer(&mut counter, value).is_err() {
+        usize::MAX
+    } else {
+        counter.0
+    }
 }
 fn empty_object() -> Value {
     json!({})
@@ -104,14 +125,49 @@ impl Cancellation {
     }
 }
 
+#[derive(Clone)]
+struct Pending {
+    token: Arc<Cancellation>,
+    bytes: usize,
+    response_bytes: usize,
+}
+struct Event {
+    value: Value,
+    bytes: usize,
+}
 struct Shared {
     snapshot: Mutex<Value>,
-    events: Mutex<VecDeque<Value>>,
-    pending: Mutex<HashMap<String, Arc<Cancellation>>>,
+    events: Mutex<VecDeque<Event>>,
+    pending: Mutex<HashMap<String, Pending>>,
     stopping: AtomicBool,
     shutdown: Notify,
 }
 impl Shared {
+    fn fail_pending(&self) {
+        self.stopping.store(true, Ordering::Release);
+        let pending: Vec<_> = lock(&self.pending)
+            .iter()
+            .map(|(id, value)| (id.clone(), value.clone()))
+            .collect();
+        for (id, value) in pending {
+            value.token.cancel();
+            self.complete(
+                &id,
+                Err(anyhow::anyhow!("native worker terminated; owned cleanup requested")),
+                None,
+            );
+        }
+    }
+    fn complete(&self, id: &str, outcome: Result<Value>, version: Option<(u64, u64)>) {
+        let mut pending = lock(&self.pending);
+        if pending.remove(id).is_none() {
+            return;
+        }
+        match version {
+            Some((generation, revision)) => self.publish_read_result(id, generation, revision, outcome),
+            None => self.publish(id, "result", outcome),
+        }
+    }
     fn envelope(&self, id: &str, kind: &str, outcome: Result<Value>) -> Value {
         let snapshot = lock(&self.snapshot);
         let generation = snapshot["runtime"]["coreGeneration"].as_u64().unwrap_or(0);
@@ -121,7 +177,7 @@ impl Shared {
                 json!({"version":1,"id":id,"kind":kind,"coreGeneration":generation,"revision":revision,"ok":true,"data":data})
             }
             Err(error) => {
-                let message = format!("{error:#}");
+                let message = format!("{error:#}").chars().take(8192).collect::<String>();
                 let code = if message.starts_with("request cancelled") {
                     "cancelled"
                 } else if message.starts_with("stale core generation") {
@@ -137,22 +193,65 @@ impl Shared {
             }
         }
     }
-    fn publish(&self, id: &str, kind: &str, outcome: Result<Value>) {
-        let event = self.envelope(id, kind, outcome);
+    fn enqueue(&self, mut event: Value) {
+        let kind = event["kind"].as_str().unwrap_or("").to_owned();
+        let topic = event["data"]["stream"].as_str().map(str::to_owned);
         let mut events = lock(&self.events);
-        if kind == "stream" && events.len() >= 256 {
+        if kind == "state" {
+            events.retain(|event| event.value["kind"] != "state");
+        }
+        if kind == "stream"
+            && topic
+                .as_deref()
+                .is_some_and(|topic| ["traffic", "memory", "connections"].contains(&topic))
+        {
+            events.retain(|old| {
+                old.value["kind"] != "stream" || old.value["data"]["stream"].as_str() != topic.as_deref()
+            });
+        }
+        let mut bytes = json_size(&event);
+        let mut total = events.iter().map(|event| event.bytes).sum::<usize>();
+        if total.saturating_add(bytes) > 128 * 1024 * 1024 && kind != "stream" {
+            events.retain(|event| event.value["kind"] != "stream");
+            total = events.iter().map(|event| event.bytes).sum();
+        }
+        if kind == "state" && total.saturating_add(bytes) > 128 * 1024 * 1024 {
+            // The authoritative snapshot remains readable when delivery is congested.
             return;
         }
-        if kind == "state" {
-            events.retain(|event| event["kind"] != "state");
+        if kind == "stream"
+            && (events.len() >= 256
+                || bytes > 4 * 1024 * 1024
+                || events
+                    .iter()
+                    .filter(|event| event.value["kind"] == "stream")
+                    .map(|event| event.bytes)
+                    .sum::<usize>()
+                    + bytes
+                    > 4 * 1024 * 1024)
+        {
+            return;
         }
-        events.push_back(event);
+        if kind == "result" && total.saturating_add(bytes) > 128 * 1024 * 1024 {
+            let succeeded = event["ok"].clone();
+            if let Some(object) = event.as_object_mut() {
+                object.remove("data");
+            }
+            event["ok"] = false.into();
+            event["operationSucceeded"] = succeeded;
+            event["error"] = json!({"code":"resultUnavailable","message":"result buffer capacity exceeded; inspect the authoritative snapshot before retrying a mutation"});
+            bytes = json_size(&event);
+        }
+        events.push_back(Event { value: event, bytes });
+    }
+    fn publish(&self, id: &str, kind: &str, outcome: Result<Value>) {
+        self.enqueue(self.envelope(id, kind, outcome));
     }
     fn publish_read_result(&self, id: &str, generation: u64, revision: u64, outcome: Result<Value>) {
         let mut event = self.envelope(id, "result", outcome);
         event["coreGeneration"] = generation.into();
         event["revision"] = revision.into();
-        lock(&self.events).push_back(event);
+        self.enqueue(event);
     }
     fn state(&self, store: &Store, runtime: &Value, id: &str) {
         let data = store.snapshot(runtime.clone());
@@ -188,10 +287,8 @@ impl Shared {
             .unwrap_or_default()
             .as_secs_f64()
             .into();
-        let mut events = lock(&self.events);
-        if events.len() < 256 {
-            events.push_back(event);
-        }
+        drop(snapshot);
+        self.enqueue(event);
     }
 }
 
@@ -206,7 +303,7 @@ pub struct Client {
     sender: mpsc::Sender<Queued>,
     shared: Arc<Shared>,
     runtime: Option<Runtime>,
-    completion: std::sync::mpsc::Receiver<()>,
+    completion: Mutex<std::sync::mpsc::Receiver<()>>,
     _directory_lock: File,
 }
 
@@ -283,9 +380,10 @@ impl Client {
         let (sender, receiver) = mpsc::channel(MAX_PENDING);
         let (complete, completion) = std::sync::mpsc::channel();
         let mut controller = Controller::new(socket, secret.clone())?;
+        controller.supervisor = options.host_path.clone();
         controller.integration_test = options.execution_mode == ExecutionMode::IntegrationTest;
         let mut worker = Worker {
-            network: network::NetworkSession::new(&options.data_dir, options.execution_mode)?,
+            network: network_client::NetworkClient::new(&options.data_dir, options.execution_mode)?,
             options,
             store,
             runtime_state,
@@ -296,45 +394,109 @@ impl Client {
             subscription: None,
         };
         runtime.spawn(async move {
-            worker.serve(receiver).await;
+            let outcome = std::panic::AssertUnwindSafe(worker.serve(receiver))
+                .catch_unwind()
+                .await;
+            if outcome.is_err() {
+                worker.shared.fail_pending();
+                let _ = std::panic::AssertUnwindSafe(worker.stop_core("")).catch_unwind().await;
+            }
             let _ = complete.send(());
         });
         Ok(Self {
             sender,
             shared,
             runtime: Some(runtime),
-            completion,
+            completion: Mutex::new(completion),
             _directory_lock: directory_lock,
         })
     }
     pub fn submit(&self, request: Request) -> i32 {
-        if request.version != 1 || request.id.is_empty() || request.id.len() > 256 || !request.args.is_object() {
+        if request.version != 1
+            || request.id.is_empty()
+            || request.id.len() > 256
+            || request.command.len() > 128
+            || !request.args.is_object()
+        {
             return 1;
         }
         if self.shared.stopping.load(Ordering::Acquire) {
             return 3;
         }
+        struct Counter(usize);
+        impl std::io::Write for Counter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0 = self
+                    .0
+                    .checked_add(bytes.len())
+                    .ok_or_else(|| std::io::Error::other("request size overflow"))?;
+                if self.0 > MAX_PENDING_BYTES {
+                    return Err(std::io::Error::other("request exceeds limit"));
+                }
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut counter = Counter(0);
+        if serde_json::to_writer(&mut counter, &request).is_err() {
+            return 1;
+        }
+        let snapshot_size = json_size(&*lock(&self.shared.snapshot));
+        let response_bytes = if ["profile.import", "profile.update", "legacy.import", "backup.restore"]
+            .contains(&request.command.as_str())
+        {
+            64 * 1024 * 1024
+        } else {
+            snapshot_size
+                .saturating_add(counter.0)
+                .saturating_add(65536)
+                .max(8 * 1024 * 1024)
+        };
         let mut pending = lock(&self.shared.pending);
+        if self.shared.stopping.load(Ordering::Acquire) || self.sender.is_closed() {
+            return 3;
+        }
         if pending.len() >= MAX_PENDING
             || pending.contains_key(&request.id)
             || lock(&self.shared.events).len() + pending.len() >= MAX_EVENTS
+            || pending.values().map(|value| value.bytes).sum::<usize>() + counter.0 > MAX_PENDING_BYTES
+            || pending
+                .values()
+                .map(|value| value.response_bytes)
+                .sum::<usize>()
+                .saturating_add(response_bytes)
+                .saturating_add(lock(&self.shared.events).iter().map(|event| event.bytes).sum::<usize>())
+                > 128 * 1024 * 1024
         {
             return 2;
         }
         let cancellation = Arc::new(Cancellation::default());
         let id = request.id.clone();
-        pending.insert(id.clone(), Arc::clone(&cancellation));
+        pending.insert(
+            id.clone(),
+            Pending {
+                token: Arc::clone(&cancellation),
+                bytes: counter.0,
+                response_bytes,
+            },
+        );
         match self.sender.try_send(Queued { request, cancellation }) {
             Ok(()) => 0,
-            Err(_) => {
+            Err(reason) => {
                 pending.remove(&id);
-                2
+                if matches!(reason, tokio::sync::mpsc::error::TrySendError::Closed(_)) {
+                    3
+                } else {
+                    2
+                }
             }
         }
     }
     pub fn cancel(&self, id: &str) -> bool {
         if let Some(token) = lock(&self.shared.pending).get(id) {
-            token.cancel();
+            token.token.cancel();
             true
         } else {
             false
@@ -346,12 +508,12 @@ impl Client {
             "revision":data["revision"],"ok":true,"data":data})
     }
     pub fn next_event(&self) -> Option<Value> {
-        lock(&self.shared.events).pop_front()
+        lock(&self.shared.events).pop_front().map(|event| event.value)
     }
     pub fn stop(&self) {
         self.shared.stopping.store(true, Ordering::Release);
         for token in lock(&self.shared.pending).values() {
-            token.cancel();
+            token.token.cancel();
         }
         self.shared.shutdown.notify_one();
     }
@@ -359,10 +521,8 @@ impl Client {
 impl Drop for Client {
     fn drop(&mut self) {
         self.stop();
-        let _ = self.completion.recv_timeout(Duration::from_secs(45));
-        if let Some(runtime) = self.runtime.take() {
-            runtime.shutdown_timeout(Duration::from_secs(1));
-        }
+        let _ = lock(&self.completion).recv();
+        drop(self.runtime.take());
     }
 }
 
@@ -375,7 +535,7 @@ struct Worker {
     shared: Arc<Shared>,
     scheduler: Scheduler,
     subscription: Option<SubscriptionTask>,
-    network: network::NetworkSession,
+    network: network_client::NetworkClient,
 }
 struct SubscriptionTask {
     ticket: UpdateTicket,
@@ -478,6 +638,7 @@ impl Worker {
         Ok(())
     }
     fn restore_network_modes(&mut self, proxy: bool, dns: Vec<String>) -> Result<()> {
+        self.network.core_pid = self.runtime_state["pid"].as_u64().unwrap_or(0) as u32;
         if proxy {
             self.network.set_proxy(true, self.store.settings.mixed_port)?;
         }
@@ -535,8 +696,7 @@ impl Worker {
                             outcome = Err(anyhow::anyhow!("stale revision"));
                         }
                     }
-                    shared.publish_read_result(&id, generation, revision, outcome);
-                    lock(&shared.pending).remove(&id);
+                    shared.complete(&id, outcome, Some((generation, revision)));
                 });
                 self.controller.read_tasks.push((token, task));
                 continue;
@@ -545,8 +705,7 @@ impl Worker {
                 .catch_unwind()
                 .await
                 .unwrap_or_else(|_| Err(anyhow::anyhow!("native command panicked")));
-            self.shared.publish(&id, "result", outcome);
-            lock(&self.shared.pending).remove(&id);
+            self.shared.complete(&id, outcome, None);
         }
         receiver.close();
         self.scheduler.cancel_all();
@@ -555,12 +714,11 @@ impl Worker {
             let _ = subscription.task.await;
         }
         while let Some(queued) = receiver.recv().await {
-            self.shared.publish(
+            self.shared.complete(
                 &queued.request.id,
-                "result",
                 Err(anyhow::anyhow!("request cancelled during shutdown")),
+                None,
             );
-            lock(&self.shared.pending).remove(&queued.request.id);
         }
         let outcome = self.stop_core("").await;
         if let Err(error) = outcome {
@@ -993,21 +1151,25 @@ impl Worker {
                 if enabled && !self.is_running() {
                     bail!("start the owned core before enabling system proxy");
                 }
+                self.network.core_pid = self.runtime_state["pid"].as_u64().unwrap_or(0) as u32;
                 let outcome = self.network.set_proxy(enabled, self.store.settings.mixed_port);
                 self.publish_state(&request.id);
                 outcome?;
                 Ok(lock(&self.shared.snapshot).clone())
             }
             "systemDns.set" => {
+                if !self.is_running() {
+                    bail!("start the owned core before configuring system DNS");
+                }
                 let servers: Vec<String> =
                     serde_json::from_value(args.get("servers").context("servers required")?.clone())?;
+                self.network.core_pid = self.runtime_state["pid"].as_u64().unwrap_or(0) as u32;
                 let outcome = self.network.set_dns(servers, self.store.settings.mixed_port);
                 self.publish_state(&request.id);
                 outcome?;
                 Ok(self.store.snapshot(self.runtime_state.clone()))
             }
             "network.restore" => {
-                self.network.authorize_recovery()?;
                 let outcome = self.network.restore();
                 self.publish_state(&request.id);
                 outcome?;
@@ -1221,6 +1383,11 @@ impl Worker {
     }
 
     async fn check_core_health(&mut self) {
+        let previous_network = self.network.state();
+        let refresh = self.network.refresh();
+        if refresh.is_err() || previous_network != self.network.state() {
+            self.publish_state("");
+        }
         if self.runtime_state["helperMode"] == true {
             match helper::request(&helper::HelperCommand::Status, false) {
                 Ok(status) if status.running && status.owner.as_deref() == Some(self.network.owner()) => return,

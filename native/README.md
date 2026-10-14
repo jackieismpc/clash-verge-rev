@@ -60,8 +60,8 @@ the owned core and restores still-owned network fields.
 
 ## Platform setup
 
-SystemConfiguration uses explicit Authorization Services rights. TUN uses the
-independent authenticated SMAppService root helper; integration mode forbids all
+System proxy, DNS and TUN use the independent authenticated SMAppService root
+helper with persistent process/field ownership; integration mode forbids all
 OS mutations before framework/IPC calls. Build, then manually run:
 
 ```sh
@@ -73,15 +73,20 @@ Register the helper from Settings → Network and approve it in System Settings.
 The installed bundle must be root-owned and non-writable to other users. Installation
 alone does not register services or modify networking. Quit before updating an
 installation; reopen both application and service after replacement. Login startup
-uses SMAppService only when its toggle changes. Read the root README for test limits.
+uses SMAppService only when its toggle changes. Use `scripts/uninstall-local.sh` as the normal user after quitting. It unregisters
+services/login, recovers networking, then deletes owned runtime/install files. Failure
+preserves recovery files. Use the default data directory for installed operation;
+custom development inputs are outside the uninstall scope. Read the root README
+for test limits and the difference between closing a window and quitting.
 
 ## Transport and validation
 
-Codable/Sendable models project the versioned JSON C ABI. AppModel applies only
+NativeCoreC imports the producer C header for ABI 2; Codable/Sendable models project
+schema-version-1 JSON. The transport rejects other ABI versions before creation. AppModel applies only
 supported schema and monotonically ordered `(generation, sequence)` snapshots.
 Rust serializes mutations and rejects stale generation/revision requests. Consumers
 free buffers and destroy the runtime only after ordered shutdown.
-`CVN_LIBRARY_PATH`, `CVN_MIHOMO_PATH`, `CVN_DATA_DIRECTORY` select development inputs.
+`CVN_LIBRARY_PATH`, `CVN_MIHOMO_PATH`, `CVN_HOST_PATH`, `CVN_DATA_DIRECTORY` select development inputs.
 
 Swift tests exercise real isolated Swift → Rust → mihomo lifecycle, import, providers,
 selection, rules, backups, reopen and snapshot ordering. Rust tests cover automatic

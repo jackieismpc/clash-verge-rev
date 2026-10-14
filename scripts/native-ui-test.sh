@@ -11,8 +11,12 @@ build_profile="${NATIVE_BUILD_PROFILE:-debug}"
 rust_profile=()
 [[ "$build_profile" == release ]] && rust_profile+=(--release)
 "$project_root/scripts/native-core-build.sh" build --offline --lib "${rust_profile[@]}"
+NATIVE_RUST_PACKAGE=clash-verge-native-helper "$project_root/scripts/native-core-build.sh" build --offline "${rust_profile[@]}"
 "$project_root/scripts/native-core-assets.sh" --offline
+/usr/bin/clang -dynamiclib -arch arm64 -mmacosx-version-min=26.0 -I "$project_root/crates/clash-verge-native-core/include" "$project_root/crates/clash-verge-native-core/tests/fixtures/abi1.c" -o "$task_work/abi1-fixture.dylib"
+export CVN_ABI1_LIBRARY_PATH="$task_work/abi1-fixture.dylib"
 export CVN_LIBRARY_PATH="$project_root/.work/target/aarch64-apple-darwin/$build_profile/libclash_verge_native_core.dylib"
+export CVN_HOST_PATH="$project_root/.work/target/aarch64-apple-darwin/$build_profile/clash-native-helper"
 export CVN_MIHOMO_PATH="$project_root/.work/engines/mihomo"
 export CVN_TEST_ROOT="$project_root/.work/integration"
 mkdir -p "$CVN_TEST_ROOT"

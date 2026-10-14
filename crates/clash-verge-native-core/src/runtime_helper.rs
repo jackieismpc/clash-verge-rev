@@ -54,6 +54,7 @@ impl Worker {
         )?;
         self.runtime_state["helperMode"] = false.into();
         self.controller = Controller::new(self.options.data_dir.join("c.sock"), self.secret.clone())?;
+        self.controller.supervisor = self.options.host_path.clone();
         self.controller.integration_test = self.options.execution_mode == crate::config::ExecutionMode::IntegrationTest;
         Ok(())
     }
@@ -66,10 +67,10 @@ impl Worker {
         }
         if !enabled {
             let proxy_on = self.network.proxy_on;
-            let dns_servers = self.network.dns_servers.clone();
+
             self.stop_core(id).await?;
             self.start_core(id, cancel).await?;
-            self.restore_network_modes(proxy_on, dns_servers)?;
+            self.restore_network_modes(proxy_on, vec![])?;
             self.publish_state(id);
             return Ok(());
         }

@@ -30,7 +30,7 @@ private func unusedPort() throws -> UInt16 {
     let root = try #require(environment["CVN_TEST_ROOT"])
     let directory = URL(fileURLWithPath: root).appendingPathComponent("u-" + UUID().uuidString.prefix(8))
     defer { try? FileManager.default.removeItem(at: directory) }
-    let transport = NativeCoreTransport(options: NativeCoreOptions(libraryPath: library, dataDirectory: directory.path, mihomoPath: mihomo, mixedPort: try unusedPort(), executionMode: .integrationTest, integrationRoot: root))
+    let transport = NativeCoreTransport(options: NativeCoreOptions(libraryPath: library, dataDirectory: directory.path, mihomoPath: mihomo, hostPath: environment["CVN_HOST_PATH"], mixedPort: try unusedPort(), executionMode: .integrationTest, integrationRoot: root))
     do {
         let imported = try await transport.execute(CommandEnvelope(command: "importProfile", payload: ["name": "链接样本", "uri": "ss://YWVzLTEyOC1nY206ZXhhbXBsZQ@example.invalid:443#Sample"]))
         #expect(imported.profiles.count == 1)
@@ -57,7 +57,7 @@ private func unusedPort() throws -> UInt16 {
     let root = try #require(environment["CVN_TEST_ROOT"])
     let directory = URL(fileURLWithPath: root).appendingPathComponent("i-" + UUID().uuidString.prefix(8))
     defer { try? FileManager.default.removeItem(at: directory) }
-    let transport = NativeCoreTransport(options: NativeCoreOptions(libraryPath: library, dataDirectory: directory.path, mihomoPath: mihomo, mixedPort: try unusedPort(), executionMode: .integrationTest, integrationRoot: root))
+    let transport = NativeCoreTransport(options: NativeCoreOptions(libraryPath: library, dataDirectory: directory.path, mihomoPath: mihomo, hostPath: environment["CVN_HOST_PATH"], mixedPort: try unusedPort(), executionMode: .integrationTest, integrationRoot: root))
     let providerServer = try await HTTPRuleFixture.start()
     defer { providerServer.stop() }
     do {
@@ -138,11 +138,78 @@ private func unusedPort() throws -> UInt16 {
         let renamed = try await transport.execute(CommandEnvelope(command: "renameProfile", payload: ["profileID": profile.id, "name": "已保存"] ))
         #expect(renamed.profiles.first?.name == "已保存")
         await transport.shutdown()
-        let reopened = NativeCoreTransport(options: NativeCoreOptions(libraryPath: library, dataDirectory: directory.path, mihomoPath: mihomo, mixedPort: try unusedPort(), executionMode: .integrationTest, integrationRoot: root))
+        let reopened = NativeCoreTransport(options: NativeCoreOptions(libraryPath: library, dataDirectory: directory.path, mihomoPath: mihomo, hostPath: environment["CVN_HOST_PATH"], mixedPort: try unusedPort(), executionMode: .integrationTest, integrationRoot: root))
         #expect(try await reopened.snapshot().profiles.first?.name == "已保存")
         await reopened.shutdown()
     } catch {
         await transport.shutdown()
         throw error
     }
+}
+
+private func forwardThroughOwnedProxy(_ port: UInt16, _ target: String) throws -> Int32 {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+    process.arguments = ["-q", "--proxy", "http://127.0.0.1:\(port)", "--noproxy", "", "--max-time", "5", "--silent", "--fail", "--output", "/dev/null", target]
+    process.environment = [:]
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    try process.run()
+    process.waitUntilExit()
+    return process.terminationStatus
+}
+
+@Test func appendedRuleControlsActualForwardingAndSurvivesRestartAndBackup() async throws {
+    let env = ProcessInfo.processInfo.environment
+    let root = try #require(env["CVN_TEST_ROOT"])
+    let directory = URL(fileURLWithPath: root).appendingPathComponent("r-" + UUID().uuidString.prefix(8))
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let port = try unusedPort()
+    let library = try #require(env["CVN_LIBRARY_PATH"])
+    let mihomo = try #require(env["CVN_MIHOMO_PATH"])
+    let transport = NativeCoreTransport(options: NativeCoreOptions(libraryPath: library, dataDirectory: directory.path, mihomoPath: mihomo, hostPath: env["CVN_HOST_PATH"], mixedPort: port, executionMode: .integrationTest, integrationRoot: root))
+    let target = try await HTTPRuleFixture.start()
+    defer { target.stop() }
+    do {
+        _ = try await transport.execute(CommandEnvelope(command: "importProfile", payload: ["name": "规则命中夹具", "yaml": "proxies: []\nrules: ['MATCH,DIRECT']\n"]))
+        _ = try await transport.execute(CommandEnvelope(command: "startCore"))
+        #expect(try forwardThroughOwnedProxy(port, target.url) == 0)
+        let requests = target.requestCount
+        #expect(requests == 1)
+        let rule = "IP-CIDR,127.0.0.1/32,REJECT,no-resolve"
+        let covered = try await transport.execute(CommandEnvelope(command: "setRuleOverrides", payload: ["prepend": "", "append": rule, "delete": ""]))
+        #expect(covered.rules.first?.target == "REJECT")
+        #expect(covered.rules.last?.kind == "Match")
+        #expect(try forwardThroughOwnedProxy(port, target.url) != 0)
+        #expect(target.requestCount == requests)
+        await #expect(throws: ClientFailure.self) {
+            try await transport.execute(CommandEnvelope(command: "setRuleOverrides", payload: ["prepend": "MATCH,DIRECT", "append": "", "delete": ""]))
+        }
+        #expect(try await transport.snapshot().ruleOverrides.append == [rule])
+        #expect(try forwardThroughOwnedProxy(port, target.url) != 0)
+        let saved = try await transport.execute(CommandEnvelope(command: "createBackup"))
+        let backup = try #require(saved.backups.first)
+        _ = try await transport.execute(CommandEnvelope(command: "setRuleOverrides", payload: ["prepend": "", "append": "", "delete": ""]))
+        #expect(try forwardThroughOwnedProxy(port, target.url) == 0)
+        _ = try await transport.execute(CommandEnvelope(command: "restoreBackup", payload: ["backupID": backup.id]))
+        #expect(try forwardThroughOwnedProxy(port, target.url) != 0)
+        _ = try await transport.execute(CommandEnvelope(command: "stopCore"))
+        _ = try await transport.execute(CommandEnvelope(command: "startCore"))
+        #expect(try forwardThroughOwnedProxy(port, target.url) != 0)
+        #expect(target.requestCount == requests + 1)
+        await transport.shutdown()
+    } catch { await transport.shutdown(); throw error }
+}
+
+@Test func incompatibleABIFailsBeforeCreatingRuntime() async throws {
+    let env = ProcessInfo.processInfo.environment
+    let root = try #require(env["CVN_TEST_ROOT"])
+    let directory = URL(fileURLWithPath: root).appendingPathComponent("a-" + UUID().uuidString.prefix(8))
+    let transport = NativeCoreTransport(options: NativeCoreOptions(libraryPath: try #require(env["CVN_ABI1_LIBRARY_PATH"]), dataDirectory: directory.path, executionMode: .integrationTest, integrationRoot: root))
+    do {
+        _ = try await transport.snapshot()
+        Issue.record("ABI 1 unexpectedly accepted")
+    } catch let failure as ClientFailure { #expect(failure.code == "abi_mismatch") }
+    #expect(!FileManager.default.fileExists(atPath: directory.path))
+    await transport.shutdown()
 }

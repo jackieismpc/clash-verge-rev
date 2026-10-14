@@ -2,6 +2,7 @@
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+#[cfg(test)]
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,12 +20,23 @@ pub struct NetworkValue {
 pub struct OwnedChange {
     pub before: NetworkValue,
     pub applied: NetworkValue,
+    #[serde(default)]
+    pub restore_pending: bool,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct OwnershipSnapshot {
     pub owner: String,
     pub changes: Vec<OwnedChange>,
 }
+
+#[derive(Debug)]
+pub struct MissingNetworkService;
+impl std::fmt::Display for MissingNetworkService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "network service or protocol was removed")
+    }
+}
+impl std::error::Error for MissingNetworkService {}
 
 pub trait NetworkBackend {
     fn read(&mut self, service: &str, protocol: &str) -> Result<NetworkValue>;
@@ -119,7 +131,11 @@ impl<B: NetworkBackend> NetworkTransaction<B> {
             }
             let before = self.backend.read(&value.service, &value.protocol)?;
             if before != value {
-                changes.push(OwnedChange { before, applied: value });
+                changes.push(OwnedChange {
+                    before,
+                    applied: value,
+                    restore_pending: false,
+                });
             }
         }
         for change in changes {
@@ -148,10 +164,14 @@ impl<B: NetworkBackend> NetworkTransaction<B> {
         let mut skipped = Vec::new();
         let mut retained = Vec::new();
         let mut failures = Vec::new();
-        for change in self.ownership.changes.drain(..).rev() {
+        for mut change in self.ownership.changes.drain(..).rev() {
             match self.backend.read(&change.applied.service, &change.applied.protocol) {
                 Ok(current) => {
-                    let (desired, externally_changed) = restoration_value(&current, &change);
+                    let (mut desired, externally_changed) = restoration_value(&current, &change);
+                    // A prior commit can succeed while SCPreferencesApplyChanges fails.
+                    if desired.is_none() && change.restore_pending && owned_fields_restored(&current, &change) {
+                        desired = Some(current.clone());
+                    }
                     if externally_changed {
                         skipped.push(format!(
                             "{}:{} externally changed fields preserved",
@@ -167,10 +187,17 @@ impl<B: NetworkBackend> NetworkTransaction<B> {
                             }
                             Err(error) => {
                                 failures.push(error.to_string());
+                                change.restore_pending = true;
                                 retained.push(change);
                             }
                         }
                     }
+                }
+                Err(error) if error.is::<MissingNetworkService>() => {
+                    skipped.push(format!(
+                        "{}:{} was removed",
+                        change.applied.service, change.applied.protocol
+                    ));
                 }
                 Err(error) => {
                     failures.push(error.to_string());
@@ -185,6 +212,22 @@ impl<B: NetworkBackend> NetworkTransaction<B> {
         }
         Ok(skipped)
     }
+}
+
+fn owned_fields_restored(current: &NetworkValue, change: &OwnedChange) -> bool {
+    let before = change.before.configuration.as_ref().and_then(Value::as_object);
+    let applied = change.applied.configuration.as_ref().and_then(Value::as_object);
+    let current = current.configuration.as_ref().and_then(Value::as_object);
+    let mut keys = std::collections::BTreeSet::new();
+    if let Some(before) = before {
+        keys.extend(before.keys());
+    }
+    if let Some(applied) = applied {
+        keys.extend(applied.keys());
+    }
+    keys.into_iter()
+        .filter(|key| before.and_then(|v| v.get(*key)) != applied.and_then(|v| v.get(*key)))
+        .all(|key| current.and_then(|v| v.get(key)) == before.and_then(|v| v.get(key)))
 }
 
 fn restoration_value(current: &NetworkValue, change: &OwnedChange) -> (Option<NetworkValue>, bool) {
@@ -271,14 +314,36 @@ pub fn proxy_configuration(original: &NetworkValue, port: u16) -> Result<Network
     })
 }
 
+pub fn validate_dns_servers(servers: &[String]) -> Result<()> {
+    if servers.len() > 16 {
+        bail!("DNS accepts at most 16 servers");
+    }
+    for server in servers {
+        let mut address: std::net::IpAddr = server.parse()?;
+        if let std::net::IpAddr::V6(v6) = address
+            && let Some(v4) = v6.to_ipv4_mapped()
+        {
+            address = v4.into();
+        }
+        if address.is_loopback()
+            || address.is_unspecified()
+            || address.is_multicast()
+            || address == std::net::IpAddr::V4(std::net::Ipv4Addr::BROADCAST)
+        {
+            bail!(
+                "system DNS must use a public or LAN unicast resolver; this app does not own a localhost DNS listener"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Keep search domains and all unrelated DNS fields; restore uses the exact original dictionary.
 pub fn dns_configuration(original: &NetworkValue, servers: &[String]) -> Result<NetworkValue> {
     if original.protocol != "DNS" || servers.is_empty() {
         bail!("DNS requires at least one literal IP address");
     }
-    for server in servers {
-        server.parse::<std::net::IpAddr>()?;
-    }
+    validate_dns_servers(servers)?;
     let mut configuration = original.configuration.clone().unwrap_or_else(|| json!({}));
     configuration
         .as_object_mut()
@@ -290,80 +355,13 @@ pub fn dns_configuration(original: &NetworkValue, servers: &[String]) -> Result<
     })
 }
 
-/// Closed helper protocol: no executable, shell command, arbitrary path or shared service channel.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum HelperRequest {
-    EnableTun { generation: u64 },
-    DisableTun { generation: u64 },
-}
-pub trait TunHelper {
-    fn ready(&self) -> bool;
-    fn request(&mut self, owner: &str, request: HelperRequest) -> Result<()>;
-}
-pub struct TunSession<H> {
-    pub helper: H,
-    mode: NetworkMode,
-    owner: String,
-    active: Option<u64>,
-}
-impl<H: TunHelper> TunSession<H> {
-    pub fn new(helper: H, mode: NetworkMode, owner: String) -> Result<Self> {
-        if !owner.starts_with("native-mac:") || owner.len() < 16 {
-            bail!("independent native owner identity required");
-        }
-        Ok(Self {
-            helper,
-            mode,
-            owner,
-            active: None,
-        })
-    }
-    pub fn available(&self) -> bool {
-        self.mode == NetworkMode::Interactive && self.helper.ready()
-    }
-    pub fn set(&mut self, enabled: bool, generation: u64) -> Result<()> {
-        if self.mode == NetworkMode::IntegrationTest {
-            bail!("integrationTest forbids helper writes");
-        }
-        if !self.helper.ready() {
-            bail!("TUN unavailable: independently authorized native helper is not installed");
-        }
-        if let Some(active) = self.active
-            && generation < active
-        {
-            bail!("stale TUN generation");
-        }
-        // Disable only the owned generation, never a later or unknown session.
-        if !enabled && self.active != Some(generation) {
-            bail!("TUN generation is not owned by this session");
-        }
-        self.helper.request(
-            &self.owner,
-            if enabled {
-                HelperRequest::EnableTun { generation }
-            } else {
-                HelperRequest::DisableTun { generation }
-            },
-        )?;
-        self.active = enabled.then_some(generation);
-        Ok(())
-    }
-}
-pub struct UnavailableNativeHelper;
-impl TunHelper for UnavailableNativeHelper {
-    fn ready(&self) -> bool {
-        false
-    }
-    fn request(&mut self, _: &str, _: HelperRequest) -> Result<()> {
-        bail!("native helper requires signing and explicit macOS administrator authorization")
-    }
-}
-
+#[cfg(test)]
 #[derive(Default)]
 pub struct SimulatedNetwork {
     pub values: BTreeMap<(String, String), Option<Value>>,
     pub writes: usize,
 }
+#[cfg(test)]
 impl NetworkBackend for SimulatedNetwork {
     fn read(&mut self, service: &str, protocol: &str) -> Result<NetworkValue> {
         Ok(NetworkValue {
@@ -580,62 +578,107 @@ mod tests {
         );
         assert_eq!(denied.backend.writes, 0);
     }
-    struct MockHelper {
-        requests: Vec<HelperRequest>,
-        fail: bool,
+}
+
+#[cfg(test)]
+mod dns_restore_regressions {
+    use super::*;
+    struct PartialApply {
+        prefs: SimulatedNetwork,
+        active: Option<Value>,
+        fail_restore: bool,
+        removed: bool,
     }
-    impl TunHelper for MockHelper {
-        fn ready(&self) -> bool {
-            true
-        }
-        fn request(&mut self, _: &str, request: HelperRequest) -> Result<()> {
-            if self.fail {
-                bail!("fixture failure");
+    impl NetworkBackend for PartialApply {
+        fn read(&mut self, service: &str, protocol: &str) -> Result<NetworkValue> {
+            if self.removed {
+                return Err(MissingNetworkService.into());
             }
-            self.requests.push(request);
+            self.prefs.read(service, protocol)
+        }
+        fn write(&mut self, value: &NetworkValue) -> Result<()> {
+            self.prefs.write(value)?;
+            if self.fail_restore
+                && value
+                    .configuration
+                    .as_ref()
+                    .is_none_or(|v| v["ServerAddresses"] == json!(["192.0.2.1"]))
+            {
+                self.fail_restore = false;
+                bail!("fixture SC commit succeeded but apply failed");
+            }
+            self.active = value.configuration.clone();
             Ok(())
         }
     }
     #[test]
-    fn tun_guard_generation_and_capability() {
-        let mut session = TunSession::new(
-            MockHelper {
-                requests: vec![],
-                fail: false,
-            },
-            NetworkMode::IntegrationTest,
-            "native-mac:fixture".into(),
-        )
-        .unwrap();
-        assert!(!session.available());
-        assert!(session.set(true, 1).is_err());
-        assert!(session.helper.requests.is_empty());
-        let mut session = TunSession::new(
-            MockHelper {
-                requests: vec![],
-                fail: false,
-            },
-            NetworkMode::Interactive,
-            "native-mac:fixture".into(),
-        )
-        .unwrap();
-        session.helper.fail = true;
-        assert!(session.set(true, 2).is_err());
-        assert!(session.active.is_none());
-        session.helper.fail = false;
-        session.set(true, 2).unwrap();
-        assert!(session.set(false, 1).is_err());
-        session.helper.fail = true;
-        assert!(session.set(false, 2).is_err());
-        assert_eq!(session.active, Some(2));
-        session.helper.fail = false;
-        session.set(false, 2).unwrap();
-        let native = TunSession::new(
-            UnavailableNativeHelper,
-            NetworkMode::Interactive,
-            "native-mac:fixture".into(),
-        )
-        .unwrap();
-        assert!(!native.available());
+    fn failed_apply_is_retried_even_when_preferences_already_show_original_dns() {
+        for original in [
+            None,
+            Some(json!({"ServerAddresses":["192.0.2.1"],"SearchDomains":["corp.example"]})),
+        ] {
+            let before = NetworkValue {
+                service: "fixture".into(),
+                protocol: "DNS".into(),
+                configuration: original.clone(),
+            };
+            let mut backend = PartialApply {
+                prefs: SimulatedNetwork::default(),
+                active: original.clone(),
+                fail_restore: false,
+                removed: false,
+            };
+            backend.prefs.write(&before).unwrap();
+            let desired = dns_configuration(&before, &["192.0.2.53".into()]).unwrap();
+            let mut tx =
+                NetworkTransaction::new(backend, NetworkMode::Interactive, "native-mac:fixture".into()).unwrap();
+            tx.apply(vec![desired.clone()]).unwrap();
+            tx.backend.fail_restore = true;
+            assert!(tx.restore().is_err());
+            assert_eq!(tx.backend.active, desired.configuration);
+            assert_eq!(tx.backend.read("fixture", "DNS").unwrap(), before);
+            let persisted: OwnershipSnapshot =
+                serde_json::from_slice(&serde_json::to_vec(&tx.ownership).unwrap()).unwrap();
+            let mut reopened =
+                NetworkTransaction::new(tx.backend, NetworkMode::Interactive, "native-mac:fixture".into()).unwrap();
+            reopened.adopt_snapshot(persisted).unwrap();
+            reopened.restore().unwrap();
+            assert_eq!(reopened.backend.active, original);
+            assert!(reopened.ownership.changes.is_empty());
+        }
+    }
+    #[test]
+    fn removed_service_is_not_recreated_during_restore() {
+        let backend = PartialApply {
+            prefs: SimulatedNetwork::default(),
+            active: None,
+            fail_restore: false,
+            removed: false,
+        };
+        let mut tx = NetworkTransaction::new(backend, NetworkMode::Interactive, "native-mac:fixture".into()).unwrap();
+        let before = tx.backend.read("fixture", "DNS").unwrap();
+        tx.apply(vec![dns_configuration(&before, &["192.0.2.53".into()]).unwrap()])
+            .unwrap();
+        tx.backend.removed = true;
+        let writes = tx.backend.prefs.writes;
+        tx.restore().unwrap();
+        assert!(tx.ownership.changes.is_empty());
+        assert_eq!(tx.backend.prefs.writes, writes);
+    }
+    #[test]
+    fn unavailable_localhost_resolvers_are_rejected_before_write() {
+        for value in [
+            "127.0.0.1",
+            "::1",
+            "0.0.0.0",
+            "::",
+            "224.0.0.1",
+            "ff02::1",
+            "255.255.255.255",
+            "::ffff:127.0.0.1",
+        ] {
+            assert!(validate_dns_servers(&[value.into()]).is_err());
+        }
+        validate_dns_servers(&["192.168.1.1".into(), "2001:db8::53".into()]).unwrap();
     }
 }

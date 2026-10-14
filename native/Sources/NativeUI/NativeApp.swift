@@ -1,4 +1,5 @@
 import SwiftUI
+import ServiceManagement
 
 // SDK 27 also exposes a State macro whose plugin is absent from Command Line Tools.
 // Keep the stable property wrapper explicit so this package builds without Xcode.
@@ -9,12 +10,23 @@ typealias ViewState<Value> = SwiftUI.State<Value>
     private var terminating = false
     private var visibilityObservers: [NSObjectProtocol] = []
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if CommandLine.arguments.contains("--prepare-uninstall") {
+            Task {
+                do {
+                    let service = SMAppService.daemon(plistName: "io.github.jackieismpc.clash-native.helper.plist")
+                    if service.status != .notRegistered { try await service.unregister() }
+                    if SMAppService.mainApp.status != .notRegistered { try await SMAppService.mainApp.unregister() }
+                    Darwin.exit(0)
+                } catch { fputs("Service unregistration failed; installation was preserved.\n", stderr); Darwin.exit(1) }
+            }
+            return
+        }
         Self.model?.startMonitoring()
         for name in [NSWindow.didChangeOcclusionStateNotification, NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification, NSWindow.didBecomeKeyNotification, NSWindow.willCloseNotification] {
             visibilityObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { notification in
-                let closingMain = name == NSWindow.willCloseNotification && (notification.object as? NSWindow)?.title == "Clash Native"
+                let window = notification.object as? NSWindow
                 MainActor.assumeIsolated {
-                    if closingMain {
+                    if name == NSWindow.willCloseNotification && window?.title == "Clash Native" {
                         Self.model?.setWindowVisibility(false)
                     } else {
                         Self.model?.setWindowVisibility(NSApplication.shared.windows.contains { $0.title == "Clash Native" && $0.isVisible && !$0.isMiniaturized && $0.occlusionState.contains(.visible) })
@@ -53,7 +65,7 @@ typealias ViewState<Value> = SwiftUI.State<Value>
         Window("Clash Native", id: "main") {
             RootView(model: model)
                 .frame(minWidth: 980, minHeight: 628)
-                .onAppear { model.startMonitoring(); model.setWindowVisibility(true) }
+                .onAppear { if !CommandLine.arguments.contains("--prepare-uninstall") { model.startMonitoring(); model.setWindowVisibility(true) } }
         }
         .defaultSize(width: model.isDemo && CommandLine.arguments.contains("--minimum-window") ? 980 : 1280,
                      height: model.isDemo && CommandLine.arguments.contains("--minimum-window") ? 680 : 820)

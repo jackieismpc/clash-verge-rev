@@ -1,13 +1,9 @@
-use crate::{
-    config::ExecutionMode,
-    platform::{
-        MacNetwork, NetworkBackend, NetworkMode, NetworkTransaction, OwnershipSnapshot, dns_configuration,
-        proxy_configuration,
-    },
+use crate::platform::{
+    MacNetwork, NetworkBackend, NetworkMode, NetworkTransaction, OwnershipSnapshot, dns_configuration,
+    proxy_configuration,
 };
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{
     io::Write,
     os::unix::fs::OpenOptionsExt,
@@ -35,17 +31,7 @@ pub struct NetworkSession<B = MacNetwork> {
     recovery_required: bool,
 }
 impl NetworkSession<MacNetwork> {
-    pub fn new(directory: &Path, mode: ExecutionMode) -> Result<Self> {
-        let mode = if mode == ExecutionMode::IntegrationTest {
-            NetworkMode::IntegrationTest
-        } else {
-            NetworkMode::Interactive
-        };
-        let digest = Sha256::digest(directory.canonicalize()?.as_os_str().as_encoded_bytes());
-        let owner = format!(
-            "native-mac:{}",
-            digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
-        );
+    pub fn open_owned(directory: &Path, mode: NetworkMode, owner: String) -> Result<Self> {
         let mut transaction = NetworkTransaction::new(MacNetwork::new(mode), mode, owner)?;
         let journal = directory.join("network-ownership.json");
         if journal.exists() {
@@ -54,7 +40,9 @@ impl NetworkSession<MacNetwork> {
                 bail!("invalid network ownership journal");
             }
             let snapshot: OwnershipSnapshot = serde_json::from_slice(&std::fs::read(&journal)?)?;
-            transaction.adopt_snapshot(snapshot)?;
+            if !snapshot.changes.is_empty() || snapshot.owner == transaction.ownership.owner {
+                transaction.adopt_snapshot(snapshot)?;
+            }
         }
         Ok(Self {
             transaction,
@@ -67,19 +55,25 @@ impl NetworkSession<MacNetwork> {
     }
 }
 impl<B: NetworkAccess> NetworkSession<B> {
-    pub fn owner(&self) -> &str {
-        &self.transaction.ownership.owner
+    #[cfg(test)]
+    pub(crate) fn fixture(backend: B, journal: PathBuf) -> Self {
+        Self {
+            transaction: NetworkTransaction::new(backend, NetworkMode::Interactive, "native-mac:fixture".into())
+                .unwrap(),
+            journal,
+            proxy_on: false,
+            dns_servers: vec![],
+            mode: NetworkMode::Interactive,
+            recovery_required: false,
+        }
     }
     pub fn state(&self) -> Value {
         let recovery = self.recovery_required
             || (!self.transaction.ownership.changes.is_empty() && !self.proxy_on && self.dns_servers.is_empty());
         json!({"systemProxy":if self.mode==NetworkMode::IntegrationTest {"unavailable"} else if recovery {"failed"} else if self.proxy_on {"on"} else {"off"},"dns":if recovery {"failed"} else if self.dns_servers.is_empty() {"off"} else {"on"},"tun":"off","recoveryRequired":recovery})
     }
-    pub fn set_proxy(&mut self, enabled: bool, port: u16) -> Result<()> {
-        self.reconcile(enabled, self.dns_servers.clone(), port)
-    }
-    pub fn set_dns(&mut self, servers: Vec<String>, port: u16) -> Result<()> {
-        self.reconcile(self.proxy_on, servers, port)
+    pub fn configure(&mut self, proxy: bool, dns: Vec<String>, port: u16) -> Result<()> {
+        self.reconcile(proxy, dns, port)
     }
     fn reconcile(&mut self, proxy: bool, dns: Vec<String>, port: u16) -> Result<()> {
         let journal = self.journal.clone();
@@ -98,9 +92,7 @@ impl<B: NetworkAccess> NetworkSession<B> {
         if proxy && port == 0 {
             bail!("invalid proxy target");
         }
-        for server in &dns {
-            server.parse::<std::net::IpAddr>()?;
-        }
+        crate::platform::validate_dns_servers(&dns)?;
         self.transaction.backend.authorize_interactive()?;
         if !self.transaction.ownership.changes.is_empty() || self.recovery_required {
             self.restore_with_checkpoint(checkpoint)?;
@@ -140,12 +132,6 @@ impl<B: NetworkAccess> NetworkSession<B> {
         self.dns_servers = dns;
         Ok(())
     }
-    pub fn authorize_recovery(&mut self) -> Result<()> {
-        if !self.transaction.ownership.changes.is_empty() {
-            self.transaction.backend.authorize_interactive()?;
-        }
-        Ok(())
-    }
     pub fn restore(&mut self) -> Result<()> {
         let journal = self.journal.clone();
         self.restore_with_checkpoint(&mut |snapshot| persist(&journal, snapshot))
@@ -175,13 +161,29 @@ impl<B: NetworkAccess> NetworkSession<B> {
 }
 fn persist(path: &Path, snapshot: &OwnershipSnapshot) -> Result<()> {
     let temporary = path.with_extension("pending");
+    use std::os::unix::fs::MetadataExt;
+    if let Ok(metadata) = std::fs::symlink_metadata(&temporary) {
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o077 != 0
+        {
+            bail!("unsafe stale network checkpoint");
+        }
+        std::fs::remove_file(&temporary)?;
+    }
     let mut file = std::fs::OpenOptions::new()
+        .custom_flags(libc::O_NOFOLLOW)
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(&temporary)?;
     let outcome = (|| {
-        file.write_all(&serde_json::to_vec_pretty(snapshot)?)?;
+        let bytes = serde_json::to_vec_pretty(snapshot)?;
+        if bytes.len() > 65536 {
+            bail!("network ownership journal exceeds 64 KiB");
+        }
+        file.write_all(&bytes)?;
         file.sync_all()?;
         std::fs::rename(&temporary, path)?;
         std::fs::File::open(path.parent().context("journal parent missing")?)?.sync_all()?;
@@ -254,6 +256,30 @@ mod tests {
         }
     }
     #[test]
+    fn crashed_checkpoint_is_replaced_but_symlink_checkpoint_is_rejected() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.work/network-checkpoints")
+            .join(crate::unique_id());
+        std::fs::create_dir_all(&directory).unwrap();
+        let journal = directory.join("network-ownership.json");
+        let temporary = journal.with_extension("pending");
+        std::fs::write(&temporary, b"interrupted").unwrap();
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let snapshot = OwnershipSnapshot {
+            owner: "native-mac:fixture".into(),
+            changes: vec![],
+        };
+        persist(&journal, &snapshot).unwrap();
+        assert!(!temporary.exists());
+        let outside = directory.join("preserved");
+        std::fs::write(&outside, b"preserved").unwrap();
+        symlink(&outside, &temporary).unwrap();
+        assert!(persist(&journal, &snapshot).is_err());
+        assert_eq!(std::fs::read(&outside).unwrap(), b"preserved");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
     fn dns_failure_after_proxy_restoration_does_not_report_previous_on() {
         let mut session = session();
         session
@@ -263,7 +289,7 @@ mod tests {
         session.transaction.backend.fail_dns = true;
         assert!(
             session
-                .reconcile_with_checkpoint(true, vec!["127.0.0.1".into()], 7890, &mut |_| Ok(()))
+                .reconcile_with_checkpoint(true, vec!["192.0.2.53".into()], 7890, &mut |_| Ok(()))
                 .is_err()
         );
         assert!(!session.proxy_on);
@@ -283,7 +309,7 @@ mod tests {
     fn checkpoint_failure_before_dns_write_rolls_back_proxy() {
         let mut session = session();
         let mut checkpoints = 0;
-        let outcome = session.reconcile_with_checkpoint(true, vec!["127.0.0.1".into()], 7890, &mut |_| {
+        let outcome = session.reconcile_with_checkpoint(true, vec!["192.0.2.53".into()], 7890, &mut |_| {
             checkpoints += 1;
             if checkpoints == 2 {
                 bail!("fixture disk failure");
@@ -310,7 +336,7 @@ mod tests {
         let mut checkpoints = 0;
         assert!(
             session
-                .reconcile_with_checkpoint(true, vec!["127.0.0.1".into()], 7890, &mut |_| {
+                .reconcile_with_checkpoint(true, vec!["192.0.2.53".into()], 7890, &mut |_| {
                     checkpoints += 1;
                     if checkpoints == 3 {
                         bail!("fixture final journal failure");
@@ -361,7 +387,7 @@ mod tests {
     fn restore_cas_conflict_retains_journal_and_preserves_external_dns() {
         let mut session = session();
         session
-            .reconcile_with_checkpoint(false, vec!["127.0.0.1".into()], 7890, &mut |_| Ok(()))
+            .reconcile_with_checkpoint(false, vec!["192.0.2.53".into()], 7890, &mut |_| Ok(()))
             .unwrap();
         session.transaction.backend.restore_conflict = true;
         assert!(session.restore_with_checkpoint(&mut |_| Ok(())).is_err());

@@ -5,33 +5,35 @@
 extern "C" {
 #endif
 typedef struct CvnHandle CvnHandle;
-/* All strings are UTF-8 JSON, schema version 1. No callback crosses the ABI.
- * Config: {version:1,dataDir:absolute,mihomoPath?:absolute,mixedPort?:u16,
- *          executionMode?:interactive|integrationTest,integrationRoot?:absolute}.
- * Test mode requires a real .work/integration root and a private child dataDir.
- * It disables privileged effects and confines provider files and listeners.
- * Creation and destruction perform I/O: call on a background executor.
- * Request: {version:1,id:string,command:string,args:object,
- *           coreGeneration?:u64,revision?:u64}.
- * Envelope: {version:1,id:string,kind:result|state|stream,coreGeneration:u64,
- *            revision:u64,ok:bool,data?:any,error?:{code:string,message:string}}.
- * A handle must not be accessed concurrently with destroy. Other calls may be
- * concurrent. JSON returned here is owned by the caller; free exactly once.
- * Submit: 0=accepted, 1=invalid request, 2=queue full/duplicate ID, 3=stopped.
- * Stop requests shutdown without blocking. Destroy waits for owned cleanup.
- * A result is emitted exactly once for each accepted request. Cancellation
- * before commit is an error; after commit the authoritative result wins.
+typedef struct { const uint8_t *data; uint64_t length; uint64_t allocation_id; int32_t status; } CvnBuffer;
+/* ABI 2, UTF-8 JSON schema 1. Input spans must be readable for their exact length;
+ * no NUL terminator is needed. Callers never dereference handles or modify buffers.
+ * Status: 0=success, 1=invalid, 2=capacity/closing, 3=stopped, 4=no event, 5=internal.
+ * Config/request/envelope JSON schemas remain version 1. Concurrent handle calls
+ * are safe. Stop cancels; destroy initiates cleanup and returns 2 until cleanup is
+ * joined, then 0. Do not unload the library until all handles return destroy=0 and
+ * all buffers are freed. Close/free are idempotent. Data stays valid until freed.
+ * Input: config <=64 KiB, request <=64 MiB, request ID <=256 bytes.
+ * Returned buffers carry exact lengths and allocation IDs, bounded to 128 MiB in
+ * total and 64 outstanding allocations. last_error is thread-local UTF-8 text.
  */
-CvnHandle *cvn_create(const char *config_json);
-char *cvn_last_error(void);
-int32_t cvn_submit(CvnHandle *handle, const char *request_json);
-int32_t cvn_cancel(CvnHandle *handle, const char *request_id);
-char *cvn_snapshot(CvnHandle *handle);
-char *cvn_next_event(CvnHandle *handle);
-void cvn_free_string(char *string);
-void cvn_stop(CvnHandle *handle);
-void cvn_destroy(CvnHandle *handle);
+CvnHandle *cvn_create(const uint8_t *, uint64_t);
+CvnBuffer cvn_last_error(void);
+int32_t cvn_submit(CvnHandle *, const uint8_t *, uint64_t);
+int32_t cvn_cancel(CvnHandle *, const uint8_t *, uint64_t);
+CvnBuffer cvn_snapshot(CvnHandle *);
+CvnBuffer cvn_next_event(CvnHandle *);
+int32_t cvn_free_buffer(CvnBuffer);
+int32_t cvn_stop(CvnHandle *);
+int32_t cvn_destroy(CvnHandle *);
 uint32_t cvn_abi_version(void);
+typedef CvnHandle *(*CvnCreateFn)(const uint8_t *, uint64_t);
+typedef CvnBuffer (*CvnReadFn)(CvnHandle *);
+typedef CvnBuffer (*CvnErrorFn)(void);
+typedef int32_t (*CvnInputFn)(CvnHandle *, const uint8_t *, uint64_t);
+typedef int32_t (*CvnReleaseFn)(CvnBuffer);
+typedef int32_t (*CvnCloseFn)(CvnHandle *);
+typedef uint32_t (*CvnVersionFn)(void);
 #ifdef __cplusplus
 }
 #endif
